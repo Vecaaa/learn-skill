@@ -105,7 +105,24 @@ python3 <skill>/scripts/learndb.py misconception add --atom <slug> \
     --wrong "用户当时的错误说法" --correction "正确的版本"
 ```
 
-### 4. 收尾
+### 4. 收尾与 checkpoint（不要只在对话真正结束时才做一次）
+
+`verify`/`misconception add`/`pref add` 本身是当场写库的，不受影响。
+但**隐式信号**（用户没直说、你观察到的模式，比如"这里追问了两次"）只有在
+收尾时被你归纳成 pref 候选才会落库——如果一直拖到对话被压缩摘要或用户直接
+关闭，这部分观察会在从未落库的情况下丢失。为此收尾分两种触发方式，缺一不可：
+
+**a) 你主动做的轻量 checkpoint**：每教完 1-2 个 atom，或对话明显变长时，
+静默跑一次（不用打断教学节奏、不用报告给用户）：
+
+```bash
+python3 <skill>/scripts/learndb.py session close --atoms <slug...> \
+    --summary "≤5 行" --signals "观察到的教学信号"
+```
+
+**b) 用户随时手动触发的完整版**：用户说"先存一下进度"之类的话时，
+除了上面的 `session close`，还要跑一次 `export`，并按
+`references/evolution.md` 的门槛判断要不要写 `pref`：
 
 ```bash
 python3 <skill>/scripts/learndb.py session close --atoms <slug...> \
@@ -113,7 +130,7 @@ python3 <skill>/scripts/learndb.py session close --atoms <slug...> \
 python3 <skill>/scripts/learndb.py export
 ```
 
-然后按 `references/evolution.md` 的门槛决定要不要写 `pref`。
+两种情况都不代表学习结束——checkpoint 只是把当前进度和观察落盘，教学循环继续。
 
 ## 大目标模式（跨月计划）
 
