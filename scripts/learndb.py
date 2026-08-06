@@ -57,21 +57,73 @@ def days_since(ts):
 
 
 def recall_prob(last_verified, stability):
-    """指数遗忘曲线 R = exp(-t/S)。S 是稳定度（天），每次验证通过会变大。
+    """FSRS 启发的乘方遗忘曲线：R(t,S) = (1 + t/(9S))^-1。
 
-    这不是精确的记忆科学，只是一个够用的排序信号：它的作用是决定
-    "要不要在开讲前探一下"，而不是替代真实的检验。
+    S 被重新定义为"记忆概率降到 90% 所需的天数"（代入 t=S 验证：
+    R = (1+1/9)^-1 = 0.9，这是 FSRS 的标准约定，S 从此是一个有具体
+    含义的量，不再是任意的衰减常数）。乘方曲线比旧版的指数曲线
+    exp(-t/S) 更贴近真实遗忘数据——真实遗忘在早期下降更快、长期尾部
+    更平缓，指数曲线两段都会系统性偏离（这是 FSRS 相比更早的 SM-2
+    指数模型的核心改进点）。
+
+    这不是完整的 FSRS——真正的 FSRS 有 17~21 个在数百万条 Anki 复习
+    记录上训练出的参数，个人单用户场景没有那个数据量去验证，硬套
+    反而可能不准。这里保留的是它的核心洞察（乘方曲线 + S 的语义），
+    常数是保守选择而非拟合出来的，见 `update_stability()`。
     """
     t = days_since(last_verified)
     if t is None:
         return 0.0
-    s = max(0.5, float(stability or 1.0))
-    return round(math.exp(-t / s), 3)
+    s = max(0.1, float(stability or 1.0))
+    return round((1 + t / (9 * s)) ** -1, 3)
+
+
+def update_difficulty(d, passed, ml):
+    """检验后调整"难度"（1~10，越大越难），FSRS 里這是独立于 stability 的
+    第二个状态量，用来让 stability 的增长/衰减幅度感知"这个 atom 本身多难"。
+
+    简化版，非 FSRS 原始拟合参数：通过时难度下调，检验方法越硬（transfer
+    比 recall 更能说明"其实没那么难"）下调越多；失败时难度上调，方法越软
+    （连 recall 都过不了更能说明"真的难"）上调越多。
+    """
+    d = float(d or 5.0)
+    if passed:
+        d -= 0.3 + 0.15 * ml
+    else:
+        d += 0.6 - 0.1 * ml
+    return round(min(10.0, max(1.0, d)), 2)
+
+
+def update_stability(s_old, difficulty, passed, ml, r_now):
+    """FSRS 的核心洞察：**用一次检验的"意外程度"和"这个 atom 多难"共同决定
+    stability 该涨多少/跌多少**，而不是只看"这次结果+检验强度"两个变量
+    （旧版 `cmd_verify` 只用了后者）。
+
+    - 通过时：`r_now` 是这次检验发生时估算的回忆概率——如果本来已经算出
+      "大概率快忘了"（r_now 低）结果还是通过了，说明记得比预期牢，
+      stability 涨得应该更多；反之如果 r_now 本来就很高，通过是意料之中，
+      信息量小，涨幅应该小。同时难度越低（d 越小）天然涨得越多。
+    - 失败时：难度越高、失败前 r_now 越低（本来就没抱太大期望），惩罚
+      相对轻一些；难度低、r_now 高（"这么简单/这么新鲜居然还错了"）
+      惩罚更重。
+
+    同样是简化版、非 FSRS 原始训练参数，常数是保守选择。
+    """
+    s_old = max(0.1, float(s_old or 1.0))
+    d = float(difficulty or 5.0)
+    r = min(1.0, max(0.0, r_now))
+    if passed:
+        growth = 1.0 + (11 - d) / 10 * (1.2 - r) * (0.5 + 0.3 * ml)
+        s_new = s_old * growth
+    else:
+        penalty = 0.15 + 0.25 * (1 - d / 10) + 0.1 * r - 0.03 * ml
+        s_new = s_old * max(0.15, penalty)
+    return round(min(365.0, max(0.5, s_new)), 2)
 
 
 # schema 版本。加表/加列时 +1，并在 migrate() 里补上对应的升级动作。
 # migrate() 靠它走快速路径，避免每条命令都重跑一遍全量 DDL。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def connect():
@@ -101,7 +153,8 @@ CREATE TABLE IF NOT EXISTS atoms (
     aliases TEXT,                -- 换行分隔；中英文别名、俗称、错叫法都往里塞
     user_phrasing TEXT,          -- 用户自己复述时的原话，后续教学复用它
     level INTEGER DEFAULT 0,     -- 0..4，见 LEVEL_NAME
-    stability REAL DEFAULT 1.0,  -- 遗忘曲线的 S（天）
+    stability REAL DEFAULT 1.0,  -- 遗忘曲线的 S（天），FSRS 语义：降到90%所需天数
+    difficulty REAL DEFAULT 5.0, -- 1~10，越大越难，见 update_difficulty()
     last_verified TEXT,
     verify_method TEXT,
     source TEXT,
@@ -249,6 +302,8 @@ def migrate(con):
     cols = {r[1] for r in con.execute("PRAGMA table_info(atoms)")}
     if "phase_id" not in cols:
         con.execute("ALTER TABLE atoms ADD COLUMN phase_id INTEGER")
+    if "difficulty" not in cols:
+        con.execute("ALTER TABLE atoms ADD COLUMN difficulty REAL DEFAULT 5.0")
     pref_cols = {r[1] for r in con.execute("PRAGMA table_info(teaching_prefs)")}
     if "retired" not in pref_cols:
         con.execute("ALTER TABLE teaching_prefs ADD COLUMN retired INTEGER DEFAULT 0")
@@ -313,7 +368,7 @@ def atom_view(r):
         "level": r["level"], "level_name": LEVEL_NAME.get(r["level"], "?"),
         "recall": p, "last_verified": r["last_verified"],
         "verify_method": _col(r, "verify_method"), "status": _col(r, "status"),
-        "fail_streak": fs,
+        "fail_streak": fs, "difficulty": _col(r, "difficulty", 5.0),
         "stale": p < PROBE_THRESHOLD,
     }
 
@@ -551,37 +606,43 @@ def cmd_add(a, con):
 
 
 def cmd_verify(a, con):
-    """记一次检验结果，并按结果调整掌握度与稳定度。
+    """记一次检验结果，并按结果调整掌握度、稳定度、难度。
 
-    通过：level 提到该检验方式对应的上限，stability 放大（越熟放大越多）。
-    失败：level 压到该方式之下，stability 大幅回落，连续 3 次失败标 blocked
-          —— 硬刚同一个点是最伤学习动机的事，该止损就止损。
+    通过：level 提到该检验方式对应的上限；stability 用 FSRS 启发的公式放大——
+          涨幅同时取决于难度（越易涨越多）和"这次通过有多意外"（检验发生时
+          估算的回忆概率越低，通过后涨得越多，见 `update_stability()`）。
+    失败：level 压到该方式之下；stability 用同一公式回落，难度越高、失败前
+          回忆概率越低，惩罚相对越轻；连续 3 次失败标 blocked——硬刚同一个点
+          是最伤学习动机的事，该止损就止损。
     """
     r = con.execute("SELECT * FROM atoms WHERE slug=?", (a.slug,)).fetchone()
     if not r:
         out({"error": "not found", "slug": a.slug}); return
     ml = METHOD_LEVEL[a.method]
     lvl, stab, streak, status = r["level"], float(r["stability"] or 1.0), r["fail_streak"], r["status"]
-    if a.result == "pass":
+    diff = float(_col(r, "difficulty", 5.0) or 5.0)
+    r_now = recall_prob(r["last_verified"], stab)  # 这次检验发生时、更新前的估算回忆概率
+    passed = a.result == "pass"
+    diff = update_difficulty(diff, passed, ml)
+    stab = update_stability(stab, diff, passed, ml, r_now)
+    if passed:
         lvl = max(lvl, ml)
-        stab = round(min(365.0, max(1.0, stab) * (1.4 + 0.25 * lvl)), 2)
         streak = 0
         status = "active" if status == "blocked" else status
     else:
         lvl = max(0, min(lvl, ml - 1))
-        stab = round(max(0.5, stab * 0.4), 2)
         streak += 1
         if streak >= 3:
             status = "blocked"
     con.execute(
-        "UPDATE atoms SET level=?, stability=?, last_verified=?, verify_method=?, "
+        "UPDATE atoms SET level=?, stability=?, difficulty=?, last_verified=?, verify_method=?, "
         "fail_streak=?, status=?, user_phrasing=COALESCE(?,user_phrasing), updated=? WHERE slug=?",
-        (lvl, stab, now(), a.method, streak, status, a.phrasing, now(), a.slug))
+        (lvl, stab, diff, now(), a.method, streak, status, a.phrasing, now(), a.slug))
     con.commit()
     reindex(con, a.slug); con.commit()
     res = {"slug": a.slug, "result": a.result, "method": a.method,
            "level": lvl, "level_name": LEVEL_NAME[lvl], "stability_days": stab,
-           "fail_streak": streak, "status": status}
+           "difficulty": diff, "fail_streak": streak, "status": status}
     if status == "blocked":
         res["advice"] = "连续 3 次失败：停止硬攻，转去补前置或换个时间再来，别继续磨"
     if lvl < 4:
@@ -594,9 +655,10 @@ def cmd_set(a, con):
     for kv in a.field:
         k, _, v = kv.partition("=")
         if k not in {"name", "domain", "aliases", "user_phrasing", "level",
-                     "stability", "source", "status", "notes"}:
+                     "stability", "difficulty", "source", "status", "notes"}:
             out({"error": f"字段不可写: {k}"}); return
-        fields[k] = int(v) if k == "level" else (float(v) if k == "stability" else v)
+        fields[k] = (int(v) if k == "level" else
+                     (float(v) if k in ("stability", "difficulty") else v))
     if not fields:
         out({"error": "无字段"}); return
     con.execute(f"UPDATE atoms SET {','.join(k+'=?' for k in fields)}, updated=? WHERE slug=?",
