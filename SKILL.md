@@ -73,12 +73,27 @@ python3 <skill>/scripts/learndb.py context "<主题>"
 python3 <skill>/scripts/learndb.py probe <slug>
 ```
 
-对返回的每一项出 **1 道题**。过了立刻继续；不过就地补 2–3 分钟再回来。
+对 `probe` 列表里的每一项出 **1 道题**。过了立刻继续；不过就地补 2–3 分钟再回来。
 这是**教学决策**，不是复习课：只探直接前置，不向上追溯，不成批出题。
 成本是十秒，省下的是"用户其实忘了前置，我讲了二十分钟他一脸茫然"。
 
-**b) 讲解** —— 默认模板：**最小可跑实例 → 它为什么这样 → 一般化规则 → 边界/反例**。
-先定义后例子是教材写法，不是教学最优解。详见 `references/pedagogy.md`。
+同一份返回里还有 `teaching_guidance`，是**开讲前的诊断材料**，不是给用户的：
+
+- `domain_expertise.guidance` —— 这个领域该给多少引导（novice 给完整四步 /
+  developing 压缩 / proficient 只给形式化陈述+差异点）。**按领域熟练度定，
+  不是按这个 atom 的 level**——新 atom 永远是 level 0，照它判断会让每个新
+  知识点都从最详细讲起，对已有基础的学习者反而降低理解（专家反转效应）
+- `insights` —— 已提炼的认知画像，命中就直接用
+- `rules_by_concept_type` —— 按教学情形分组的已验证规律
+
+**b) 讲解** —— 先判断这次要讲的东西属于哪种 `concept_type`（notation /
+process / comparison / quantifier…），命中上面的 `insights` 或
+`rules_by_concept_type` 就照它组织**第一次**讲解——**不要等用户说"没懂"
+再去查**。降维梯是补救手段，不该承担本可以提前避免的困惑。
+
+没有命中任何规律时才用默认模板：**最小可跑实例 → 它为什么这样 → 一般化规则
+→ 边界/反例**（先定义后例子是教材写法，不是教学最优解），并按
+`domain_expertise` 的档位决定这四步各给多少。详见 `references/pedagogy.md`。
 
 **c) 检验** —— 每个 atom 讲完必须测。检验强度决定能记多少掌握度：
 

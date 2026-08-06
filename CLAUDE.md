@@ -427,6 +427,35 @@ checkpoint，和 `pref prune` 一样有稳定触发点。
 "读懂几条记录之间的共性"这个判断上，模板拼出来的是噪声，而且会挤占每次会话
 都要加载的 `profile` 预算。`distill` 的 hint 里明确写了 `pending` 为空时不要硬凑。
 
+### 21. 引导量按 domain 熟练度定；诊断材料挂在 `probe` 上而不是靠指令
+
+**两个问题，一个挂载点**。
+
+**问题一（引导量）**：`pedagogy.md` 原本只有"worked example 随 `level` 褪去"
+这一条，判断依据是单个 atom 的 `level`。但新 atom 永远是 level 0，照它判断的话
+**每个新知识点都要从最完整的四步模板讲起**，哪怕学习者在这个领域已经很熟。
+专家反转效应（Kalyuga）说的正是这件事：同样一段铺垫，图式未建立时是必要支撑，
+图式建立后就变成占用工作记忆的冗余，**降低**而非提高理解。实测证据来自读论文
+那场会话：讲到后期核心概念时该压缩却仍套完整模板（冗余），而一个关键的支撑性
+符号（θ）又被一句话带过（不足）——两次偏差方向相反，根源同一个：没有依据判断
+"此刻该给多少"。修法是 `domain_expertise()`：按该 domain 下 level≥3 的 atom
+**绝对数量**分三档（<3 novice / 3–6 developing / ≥7 proficient）。用绝对数
+而非比例——路线刚建好时大批 atom 挂在 level 0，比例会把很熟的领域误判成新手。
+
+**问题二（诊断先于响应）**：外部研究里反复出现的一条——多数生成式导师把
+"认知诊断"和"教学决策"纠缠在一次生成里，看到困惑就直接编解释，头几次往往
+文不对题（θ 那次先给类比被拒、再给公式才落地，正是这个模式）。降维梯的
+"先定位"只在用户**已经**说没懂之后触发，是被动补救，不是开讲前的主动诊断。
+
+**为什么两者合并到 `probe`**：按决策 18 的原则，"记得先查规律再讲"这种纯文字
+指令不可靠。`probe` 是教学循环里每个 atom 都必跑的第一步，是最稳定的挂载点。
+所以 `probe` 的返回里多了 `teaching_guidance`：引导量档位 + 已提炼的
+`insights` + 按 `concept_type` 分组的生效规则。**诊断材料在开讲前自动摆好，
+而不是指望模型记得去查**——这是让"诊断先于响应"真的发生的唯一可靠办法。
+`context` 也返回 `domain_expertise`（可能跨多个 domain，各自档位不同）。
+
+**没有改 schema**：纯查询层的组装，`SCHEMA_VERSION` 不变。
+
 ---
 
 ## 可调参数
@@ -445,6 +474,8 @@ checkpoint，和 `pref prune` 一样有稳定触发点。
 | 规则过期 | `cmd_pref prune` | 90 天 | — |
 | 规则总数上限 | evolution.md | 30 条 | 文档约束，未强制 |
 | `context --limit` | learndb.py | 25 个 atom | 上下文预算 |
+| 引导量档位的分界 | `GUIDANCE_TIERS` | 3 / 7（该 domain 下 level≥3 的 atom 数） | 调低 → 更早进入压缩讲解（更快但可能跳步）；调高 → 更久保持完整四步（更稳但对熟练领域啰嗦） |
+| 提炼阈值 | `DISTILL_MIN_PREFS` / `DISTILL_MIN_MISC` | 3 / 2 | 调低 → 更早提炼画像，但样本少时容易提炼出过度泛化的特征 |
 | 单次输出上限 | SKILL.md 硬约束 | 1 atom + 2 术语 | 最可能被用户要求放宽的一条 |
 | 阶段时间校准的比值上下限 | `cmd_phase` 的 `close` 分支 | 限制在 0.5–2.0 倍 | 收窄 → 校准更保守；放宽 → 单次异常波动更容易把后面全打乱 |
 | 失败后是否让 recall 归零 | `effective_recall()` | `fail_streak > 0` 即归零 | 关掉会让刚答错的前置被探针跳过（决策 16 就是修这个），不建议动 |
@@ -637,4 +668,5 @@ unset LEARN_DB && rm -f /tmp/reg.db
 | 2026-08-05 | **checkpoint 的 signals 深度不足**（同一次读论文会话的后续复盘）。上一条改动解决了"何时触发"，但没解决"触发时写什么"——实测中一个知识点（θ 这个符号）内部发生了多轮追问才真正讲懂，但模型当时跑 checkpoint 时只在 `--signals` 里写了一句单轮印象式总结（"用户是刨根问底型"），没有回顾这条多轮追问链条本身、提炼出"公式该排在类比前面讲"这类可复用的结构性规律——这类规律只有在用户事后明确追问"能学到什么"时才被挖出来，说明模型在教学过程中专注于往下讲，容易漏掉需要跨轮对比才能看出的模式。修法：SKILL.md 第4步 checkpoint 部分补一条——写 `--signals` 时如果某 atom 内部有多轮追问/反复卡住，先回顾整条链条再提炼结构性规律，不要只记单轮印象。用户确认为长期规则。 |
 | 2026-08-05 | **`teaching_prefs` 新增作废机制**（决策 17）。起因：用户在纯终端 Claude Code 里定的"公式用 Unicode 不用 LaTeX"规则被误记成 `scope=global`，同一天在渲染 Markdown 的对话界面里用户要求相反的行为，暴露出旧规则的判断依据（终端不渲染 LaTeX）被错误地当成了普适事实，且系统没有任何方式作废一条已确认前提有误的规则（`prune` 只处理 `active=1`）。修法：`teaching_prefs` 加 `retired`/`retired_reason`/`retired_at`（`SCHEMA_VERSION` 2→3），新增 `pref retire --id --reason`；`pref add` 撞到已作废的同文本规则会拒绝并提示作废理由，不能靠追加证据复活。作废保留审计轨迹，不做真删除（呼应决策 15 的引用完整性思路）。同时作废了库里 4 条围绕这个错误假设的规则，改记到 `profile.formula_notation`（L1，环境条件判断：能渲染 Markdown 用 LaTeX，纯终端用 Unicode）——这类"事实取决于当前运行环境"的偏好本来就该归 L1 用户模型，不该归 L2 教学策略，早期分类本身就错了。冒烟测试 + 回归测试 + 老库迁移测试（模拟无 `retired` 列的旧库）全部通过，`doctor` 无异常。 |
 | 2026-08-05 | **遗忘曲线换成 FSRS 启发的乘方形式 + 独立 difficulty**（决策 19，`SCHEMA_VERSION` 4→5）。用户对比同类开源项目（`claude-tutor` 用 SM-2、`OpenTutor` 扩展 FSRS）后提出。`recall_prob` 从自制的 `exp(-t/S)` 换成 `(1 + t/(9S))^-1`，`S` 从任意衰减常数变成有明确语义的量（记忆概率降到 90% 所需天数）；`atoms` 加 `difficulty`（1~10），`cmd_verify` 改用 `update_difficulty()`/`update_stability()`，采纳 FSRS 的核心洞察——通过检验时的"意外程度"（检验发生时估算的回忆概率越低）决定 stability 涨幅。**明确没做**：没照搬 FSRS 的 17~21 个训练参数（那是数百万条 Anki 记录拟合的，单用户场景无从验证），常数是保守选择并在 docstring 里标注清楚，不要误当成"真正的 FSRS"。回归测试（含决策 16 的 fail-streak 探针检查）+ 老库迁移全过。 |
+| 2026-08-05 | **引导量按 domain 熟练度 + 诊断材料挂到 `probe`**（决策 21，无 schema 变更）。这一项把上一轮列出的方向 A 和 ① 合并实现，因为两者是同一件事的两面（"教之前该知道什么"），且共享同一个可靠挂载点。A：新增 `domain_expertise()`，按该 domain 下 level≥3 的 atom 绝对数分三档（<3 novice / 3–6 developing / ≥7 proficient）决定引导总量——原来只按单个 atom 的 `level` 判断，而新 atom 永远是 level 0，导致每个新知识点都从最完整的四步模板讲起，对已有基础的学习者反而降低理解（专家反转效应）。①：新增 `teaching_guidance()`，把引导档位 + 已提炼的 `insights` + 按 `concept_type` 分组的生效规则一次性挂进 `probe` 的返回——`probe` 是教学循环里每个 atom 都必跑的第一步，是最稳定的挂载点，比"记得先查规律再讲"这种文字指令可靠得多（同决策 18）。`context` 也返回 `domain_expertise`（可跨多个 domain）。`pedagogy.md` 新增"引导总量按领域熟练度定"一节，`SKILL.md` 的探针/讲解两步改写。**顺带修掉两个静默失败**：`probe`/`plan` 传一个不存在的 slug 时原本静默返回空列表（看起来像"没有前置要探/要补"，实际可能只是拼错），现在给干净报错——`probe` 的那处还因为这次新增的 `_col(target, "domain")` 变成了崩溃（`None` 抛 `TypeError`，`_col` 原本只捕 `IndexError`/`KeyError`），一并修了。全套回归 + 边界用例（无 domain 的 atom、空 context、不存在的 slug）通过。 |
 | 2026-08-05 | **抽象层统一设计：`error_type` + `distill`**（决策 20，`SCHEMA_VERSION` 5→6）。用户要求重点优化"教学"而非"复习"方向，第二轮外部研究（专家反转效应、ITS 的 buggy model/error taxonomy、自我解释元分析）后确定做这一项。核心认识：`teaching_prefs` 和 `misconceptions` 存的都是具体记录，跨领域时归零——这是记忆机制最根本的天花板。修法是同一个模式在三处落地（不是三个独立特性）：`misconceptions` 加 `error_type`（对称于上一轮加的 `concept_type`），新增 `misconception retag` 和 `--error-type` 跨域查询；新增 `distill` 命令，把"该提炼成认知画像了"变成能被算出来的状态（记录数够阈值 + `profile` 无对应 `insight:` 条目或条目已过时），输出附带全部原始记录供模型提炼，已挂进完整版 checkpoint（同决策 18 的原则）。**踩到的坑值得记**：第一次给库里 5 条误区打 `error_type` 打出 5 个互不相同的类型，`distill` 一条都触发不了——抽象标签如果每条记录一个就等于没建，判断标准是"补救策略是不是同一套"而非"看起来像不像"；重新归类合并出 `aggregate-vs-instance` 和 `existential-claim` 两类（各 2 条），提炼出库里最初的两条 `insight:`。`pedagogy.md`/`evolution.md`/`memory-schema.md`/`SKILL.md` 同步更新，全套回归 + v4 老库迁移测试通过。 |

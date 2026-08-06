@@ -360,11 +360,77 @@ def effective_recall(level, last_verified, stability, fail_streak=0):
 
 
 def _col(r, name, default=None):
-    """安全取列：老库/局部 SELECT 可能没有这一列。"""
+    """安全取列：老库/局部 SELECT 可能没有这一列，行本身也可能是 None。"""
     try:
         return r[name]
-    except (IndexError, KeyError):
+    except (IndexError, KeyError, TypeError):
         return default
+
+
+# 引导量档位：按该 domain 下"能应用及以上"的 atom 绝对数量分档。
+# 用绝对数而不是比例——路线刚建好时大批 atom 还是 level 0，比例会把
+# 一个其实已经很熟的领域误判成新手。
+GUIDANCE_TIERS = [
+    (3,  "novice",     "完整引导：最小可跑实例 → 为什么这样 → 一般化规则 → 边界/反例，四步都给"),
+    (7,  "developing", "压缩引导：实例和一般化规则各留一句，省掉铺垫，直接进这个领域的惯用记号"),
+    (99, "proficient", "最小引导：直接给形式化陈述/原文，只标注与已知内容的差异点；"
+                       "冗余的入门铺垫在这个阶段会占用工作记忆、反而降低理解（专家反转效应）"),
+]
+
+
+def domain_expertise(con, domain):
+    """该 domain 的熟练度画像——决定讲解时该给多少引导。
+
+    **为什么不能用 atom 自己的 level 来定引导量**：新 atom 永远是 level 0，
+    照它来判断的话每个新知识点都要从最详细的四步模板讲起。但真正决定
+    "该给多少引导"的是学习者在**这个领域整体**的熟练度：领域里已经建立
+    了足够多的图式之后，入门铺垫就从"必要的支撑"变成"占用工作记忆的冗余"，
+    实测中这会降低而非提高理解效率（Kalyuga 的 expertise reversal effect）。
+    """
+    if not domain:
+        return None
+    rows = con.execute(
+        "SELECT level FROM atoms WHERE domain=? AND status!='retired'", (domain,)).fetchall()
+    if not rows:
+        return None
+    applicable = sum(1 for r in rows if (r["level"] or 0) >= 3)
+    proven = sum(1 for r in rows if (r["level"] or 0) >= 4)
+    tier, guidance = next((t, g) for lim, t, g in GUIDANCE_TIERS if applicable < lim)
+    return {"domain": domain, "atoms": len(rows), "applicable": applicable,
+            "transfer_proven": proven, "tier": tier, "guidance": guidance}
+
+
+def teaching_guidance(con, domain=None):
+    """开讲前该知道的东西，一次性摆出来。
+
+    **为什么挂在 `probe` 上而不是写成"记得先查"的指令**：`probe` 是教学
+    循环里每个 atom 都必跑的第一步，是最稳定的挂载点（同 CLAUDE.md 决策 18）。
+    研究上对应的是"选教学策略前先做状态推断"——多数生成式导师把认知诊断和
+    教学决策纠缠在一次生成里，看到困惑就直接编一个解释，头几次往往文不对题。
+    把诊断材料在开讲前摆好，是让这一步真的发生的唯一可靠办法。
+    """
+    g = {}
+    exp = domain_expertise(con, domain)
+    if exp:
+        g["domain_expertise"] = exp
+    insights = {r["key"][len(INSIGHT_PREFIX):]: r["value"] for r in con.execute(
+        "SELECT key,value FROM profile WHERE key LIKE ?", (INSIGHT_PREFIX + "%",))}
+    if insights:
+        g["insights"] = insights
+    rules = con.execute(
+        "SELECT concept_type, rule FROM teaching_prefs "
+        "WHERE active=1 AND retired=0 AND concept_type IS NOT NULL AND concept_type!='' "
+        "ORDER BY evidence_count DESC LIMIT 12").fetchall()
+    if rules:
+        by_type = {}
+        for r in rules:
+            by_type.setdefault(r["concept_type"], []).append(r["rule"])
+        g["rules_by_concept_type"] = by_type
+    if g:
+        g["hint"] = ("开讲前先判断这次要讲的东西属于哪种 concept_type，"
+                     "命中 rules_by_concept_type / insights 就照它组织第一次讲解，"
+                     "别等用户说没懂再补救。引导量按 domain_expertise.guidance 定。")
+    return g or None
 
 
 def atom_view(r):
@@ -497,6 +563,13 @@ def cmd_probe(a, con):
     只看直接前置、不向上追溯，是刻意的：探针是教学决策，不是复习课。
     往上追一层就变成"我是来学新东西的你怎么让我做旧题"。
     """
+    target = con.execute("SELECT * FROM atoms WHERE slug=?", (a.slug,)).fetchone()
+    if target is None:
+        # 静默返回空 probe 列表是最坏的行为：看起来"没有前置需要探"，
+        # 实际是 slug 打错了/atom 还没建，探针从此对它永久空转（同决策 15）。
+        out({"error": f"atom 不存在：{a.slug}",
+             "fix": "先 `add` 建好这个 atom，或用 `find` 确认正确的 slug"})
+        return
     edge_rows = con.execute(
         "SELECT from_slug FROM edges WHERE to_slug=? AND type='prereq'", (a.slug,)).fetchall()
     need, ok, dangling = [], [], []
@@ -521,6 +594,9 @@ def cmd_probe(a, con):
             ok.append(v)
     res = {"target": a.slug, "probe": need, "skip": ok,
            "hint": "对 probe 列表每项出 1 道题；过了立刻继续，不过就地补 2-3 分钟"}
+    guidance = teaching_guidance(con, _col(target, "domain"))
+    if guidance:
+        res["teaching_guidance"] = guidance
     if dangling:
         res["dangling_prereqs"] = dangling
         res["warning"] = ("这些前置在库里不存在（多半是 slug 拼错）：" + ", ".join(dangling) +
@@ -530,6 +606,12 @@ def cmd_probe(a, con):
 
 def cmd_plan(a, con):
     """递归取出目标 atom 的全部前置闭包，按拓扑序（最深的祖先在前）返回。"""
+    if not con.execute("SELECT 1 FROM atoms WHERE slug=?", (a.slug,)).fetchone():
+        # 同 cmd_probe：静默返回空链看起来像"这个点没有前置要补"，
+        # 实际可能只是 slug 拼错了
+        out({"error": f"atom 不存在：{a.slug}",
+             "fix": "先 `add` 建好这个 atom，或用 `find` 确认正确的 slug"})
+        return
     rows = con.execute("""
         WITH RECURSIVE anc(slug, depth) AS (
             SELECT from_slug, 1 FROM edges WHERE to_slug=? AND type='prereq'
@@ -574,13 +656,19 @@ def cmd_context(a, con):
         "SELECT layer, scope, rule, polarity, evidence_count FROM teaching_prefs "
         "WHERE active=1 AND (scope='global' OR scope LIKE ?) "
         "ORDER BY evidence_count DESC LIMIT 20", (f"%{a.topic}%",)).fetchall()
-    out({
+    res = {
         "topic": a.topic,
         "profile": {r["key"]: r["value"] for r in con.execute("SELECT * FROM profile")},
         "known_atoms": [atom_view(r) for r in atoms],
         "open_misconceptions": [dict(r) for r in misc],
         "teaching_rules": [dict(r) for r in prefs],
-    })
+    }
+    # 主题可能横跨多个 domain，各自的熟练度不同 → 引导量也该不同
+    tiers = [e for e in (domain_expertise(con, d) for d in
+                         dict.fromkeys(r["domain"] for r in atoms if r["domain"])) if e]
+    if tiers:
+        res["domain_expertise"] = tiers
+    out(res)
 
 
 def cmd_add(a, con):
