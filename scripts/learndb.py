@@ -71,7 +71,7 @@ def recall_prob(last_verified, stability):
 
 # schema 版本。加表/加列时 +1，并在 migrate() 里补上对应的升级动作。
 # migrate() 靠它走快速路径，避免每条命令都重跑一遍全量 DDL。
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 
 def connect():
@@ -187,6 +187,7 @@ CREATE TABLE IF NOT EXISTS teaching_prefs (
     id INTEGER PRIMARY KEY,
     layer TEXT DEFAULT 'L2',     -- L1=用户模型(自动生效) L2=教学策略(需证据)
     scope TEXT DEFAULT 'global', -- global / domain:math / atom:closure
+    concept_type TEXT,           -- 跨领域维度：notation/comparison/process/quantifier 等，独立于 scope
     rule TEXT NOT NULL,
     polarity TEXT DEFAULT 'works',-- works / fails，失败教法同样要记
     evidence TEXT,               -- JSON 数组
@@ -194,7 +195,10 @@ CREATE TABLE IF NOT EXISTS teaching_prefs (
     active INTEGER DEFAULT 0,
     hit_count INTEGER DEFAULT 0,
     last_hit TEXT,
-    created TEXT
+    created TEXT,
+    retired INTEGER DEFAULT 0,   -- 规则被证伪/被更精确的规则取代时置 1，而非删除（保留审计轨迹）
+    retired_reason TEXT,
+    retired_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -245,6 +249,13 @@ def migrate(con):
     cols = {r[1] for r in con.execute("PRAGMA table_info(atoms)")}
     if "phase_id" not in cols:
         con.execute("ALTER TABLE atoms ADD COLUMN phase_id INTEGER")
+    pref_cols = {r[1] for r in con.execute("PRAGMA table_info(teaching_prefs)")}
+    if "retired" not in pref_cols:
+        con.execute("ALTER TABLE teaching_prefs ADD COLUMN retired INTEGER DEFAULT 0")
+        con.execute("ALTER TABLE teaching_prefs ADD COLUMN retired_reason TEXT")
+        con.execute("ALTER TABLE teaching_prefs ADD COLUMN retired_at TEXT")
+    if "concept_type" not in pref_cols:
+        con.execute("ALTER TABLE teaching_prefs ADD COLUMN concept_type TEXT")
     con.executescript(SCHEMA)  # 全部 IF NOT EXISTS，重复执行安全
     con.execute("INSERT INTO meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
@@ -637,45 +648,113 @@ def cmd_pref(a, con):
 
     门槛的意义：一次偶发反馈不该被固化成永久规则，否则规则集会互相打架、
     越滚越乱，最后没人敢信也没人敢删。
+
+    `retire` 是"没人敢删"这个问题的解法：某条规则的前提不再成立时
+    （比如判断依据的环境变了），标记它作废、写清理由，而不是留着和新
+    规则互相矛盾，也不是真的删掉丢失审计轨迹。被 retire 的规则不会
+    再被同文本证据复活——`add` 撞到它时会拒绝并提示原因。
     """
     if a.action == "add":
         row = con.execute("SELECT * FROM teaching_prefs WHERE rule=? AND scope=?",
                           (a.rule, a.scope)).fetchone()
+        if row and row["retired"]:
+            out({"error": f"id={row['id']} 这条规则已被作废（{row['retired_reason']}），"
+                          "不能靠追加同文本证据复活。确有必要的话，写一条新规则（换个 scope 或措辞），"
+                          "不要绕开 retire 的理由。"})
+            return
         ev = {"date": now(), "signal": a.evidence or ""}
         if row:
             evs = json.loads(row["evidence"] or "[]"); evs.append(ev)
             cnt = row["evidence_count"] + 1
             active = 1 if (row["layer"] == "L1" or cnt >= 2) else 0
-            con.execute("UPDATE teaching_prefs SET evidence=?, evidence_count=?, active=? "
-                        "WHERE id=?", (json.dumps(evs, ensure_ascii=False), cnt, active, row["id"]))
+            con.execute("UPDATE teaching_prefs SET evidence=?, evidence_count=?, active=?, "
+                        "concept_type=COALESCE(?,concept_type) WHERE id=?",
+                        (json.dumps(evs, ensure_ascii=False), cnt, active, a.concept_type, row["id"]))
             pid, promoted = row["id"], bool(active and not row["active"])
         else:
             active = 1 if a.layer == "L1" else 0
             cur = con.execute(
-                "INSERT INTO teaching_prefs(layer,scope,rule,polarity,evidence,evidence_count,"
-                "active,created) VALUES(?,?,?,?,?,1,?,?)",
-                (a.layer, a.scope, a.rule, a.polarity,
+                "INSERT INTO teaching_prefs(layer,scope,concept_type,rule,polarity,evidence,"
+                "evidence_count,active,created) VALUES(?,?,?,?,?,?,1,?,?)",
+                (a.layer, a.scope, a.concept_type, a.rule, a.polarity,
                  json.dumps([ev], ensure_ascii=False), active, now()))
             pid, promoted = cur.lastrowid, bool(active)
         con.commit()
         out({"ok": True, "id": pid, "active": bool(active), "promoted": promoted,
              "note": "L2 规则需 2 次同向证据才生效；候选规则会一直挂着直到被证实或过期"})
+    elif a.action == "retag":
+        # 补打/改打 concept_type，不算新证据——用于给已有规则补上跨领域维度的标签。
+        if not a.id or not a.concept_type:
+            out({"error": "retag 需要 --id 和 --concept-type"}); return
+        con.execute("UPDATE teaching_prefs SET concept_type=? WHERE id=?",
+                    (a.concept_type, a.id))
+        con.commit()
+        out({"ok": True, "id": a.id, "concept_type": a.concept_type})
     elif a.action == "hit":
         con.execute("UPDATE teaching_prefs SET hit_count=hit_count+1, last_hit=? WHERE id=?",
                     (now(), a.id)); con.commit(); out({"ok": True, "id": a.id})
+    elif a.action == "retire":
+        # 规则被证伪、或前提条件（比如渲染环境）不再成立时用这个，而不是留着
+        # 互相矛盾的规则等 90 天 prune——prune 只处理 active=1 的规则，且只是
+        # 降级为候选，不会阻止它靠新证据复活。retire 是明确、带理由、不可被
+        # 同文本证据复活的终态，取代记录仍在（可追溯），不是删除。
+        if not a.id or not a.reason:
+            out({"error": "retire 需要 --id 和 --reason"}); return
+        row = con.execute("SELECT id FROM teaching_prefs WHERE id=?", (a.id,)).fetchone()
+        if not row:
+            out({"error": f"没有 id={a.id} 这条规则"}); return
+        con.execute("UPDATE teaching_prefs SET retired=1, retired_reason=?, retired_at=?, "
+                    "active=0 WHERE id=?", (a.reason, now(), a.id))
+        con.commit()
+        out({"ok": True, "id": a.id, "retired_reason": a.reason})
     elif a.action == "prune":
-        # 90 天没被命中的生效规则降为候选，防止规则集无限膨胀
-        stale = [r["id"] for r in con.execute(
-            "SELECT id,last_hit,created FROM teaching_prefs WHERE active=1 AND layer='L2'")
-            if (days_since(r["last_hit"] or r["created"]) or 0) > 90]
+        # 90 天没被命中的生效规则降为候选，防止规则集无限膨胀。
+        #
+        # `last_hit` 依赖模型自觉调用 `pref hit`——这是个纯文字指令，换任何
+        # 模型跑、或者模型记忆被清空重新部署，都不能保证被记得执行（这不是
+        # 哪个模型更笨的问题，是纯文字指令天然的不可靠性）。所以这里不能
+        # 只信 last_hit：额外算一个"这个 scope 对应的领域最近是否还在被教"
+        # 的代理信号（scope 匹配的 atom 最近有没有被 verify 过）作为兜底——
+        # 只要该领域最近还在活跃教学，就不判定规则过期，哪怕 hit 从没被调用。
+        # 宁可少剪掉几条其实没用的规则，也不要错误剪掉一条其实还在起作用、
+        # 只是没被显式记录命中的规则。
+        rows = con.execute(
+            "SELECT id,scope,last_hit,created FROM teaching_prefs "
+            "WHERE active=1 AND layer='L2'").fetchall()
+        stale = []
+        for r in rows:
+            base_days = days_since(r["last_hit"] or r["created"]) or 0
+            if base_days <= 90:
+                continue
+            if r["scope"] == "global":
+                recent = con.execute(
+                    "SELECT MAX(updated) m FROM atoms").fetchone()["m"]
+            elif r["scope"].startswith("domain:"):
+                dom = r["scope"].split(":", 1)[1]
+                recent = con.execute(
+                    "SELECT MAX(updated) m FROM atoms WHERE domain LIKE ?",
+                    (f"%{dom}%",)).fetchone()["m"]
+            elif r["scope"].startswith("atom:"):
+                slug = r["scope"].split(":", 1)[1]
+                recent = con.execute(
+                    "SELECT updated m FROM atoms WHERE slug=?", (slug,)).fetchone()
+                recent = recent["m"] if recent else None
+            else:
+                recent = None
+            if recent and (days_since(recent) or 999) <= 90:
+                continue  # 领域仍活跃，即使没人调用过 pref hit 也保留
+            stale.append(r["id"])
         for i in stale:
             con.execute("UPDATE teaching_prefs SET active=0 WHERE id=?", (i,))
-        con.commit(); out({"demoted": stale, "count": len(stale)})
+        con.commit(); out({"demoted": stale, "count": len(stale),
+                            "note": "既没被pref hit命中过，对应领域也超过90天没有新的atom活动，才会被降级"})
     else:
         rows = con.execute(
-            "SELECT id,layer,scope,rule,polarity,evidence_count,active,hit_count,last_hit "
-            "FROM teaching_prefs WHERE (?=1 OR active=1) ORDER BY active DESC, "
-            "evidence_count DESC", (1 if a.all else 0,)).fetchall()
+            "SELECT id,layer,scope,concept_type,rule,polarity,evidence_count,active,hit_count,"
+            "last_hit,retired,retired_reason FROM teaching_prefs WHERE (?=1 OR active=1) "
+            "AND (?='' OR concept_type=?) "
+            "ORDER BY active DESC, evidence_count DESC",
+            (1 if a.all else 0, a.concept_type or "", a.concept_type or "")).fetchall()
         out([dict(r) for r in rows])
 
 
@@ -1198,11 +1277,18 @@ def main():
     p.set_defaults(fn=cmd_misconception)
 
     p = sub.add_parser("pref", help="教学策略进化（L1 自动 / L2 需两次证据）")
-    p.add_argument("action", choices=["add", "list", "hit", "prune"])
+    p.add_argument("action", choices=["add", "list", "hit", "prune", "retire", "retag"])
     p.add_argument("--rule"); p.add_argument("--scope", default="global")
     p.add_argument("--layer", default="L2", choices=["L1", "L2"])
     p.add_argument("--polarity", default="works", choices=["works", "fails"])
     p.add_argument("--evidence"); p.add_argument("--id", type=int)
+    p.add_argument("--reason", help="retire 专用：为什么这条规则被作废/取代")
+    p.add_argument("--concept-type", dest="concept_type",
+                    help="跨领域维度，独立于 scope：这条规则是关于哪种教学情形，"
+                         "而不是哪个领域。常见值：notation(引入新符号/记号)、"
+                         "comparison(对比/类比题)、process(讲解流程/步骤)、"
+                         "quantifier(存在性/全称这类措辞精确度)、test-design(检验题设计)。"
+                         "list 时可用同一参数过滤，跨 domain 复用同类规则")
     p.add_argument("--all", action="store_true")
     p.set_defaults(fn=cmd_pref)
 

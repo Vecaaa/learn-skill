@@ -127,14 +127,19 @@ python3 <skill>/scripts/learndb.py session close --atoms <slug...> \
 不主动回顾就会漏掉——这正是它容易被漏记的原因。
 
 **b) 用户随时手动触发的完整版**：用户说"先存一下进度"之类的话时，
-除了上面的 `session close`，还要跑一次 `export`，并按
+除了上面的 `session close`，还要跑一次 `export` 和 `pref prune`，并按
 `references/evolution.md` 的门槛判断要不要写 `pref`：
 
 ```bash
 python3 <skill>/scripts/learndb.py session close --atoms <slug...> \
     --summary "≤5 行" --signals "观察到的教学信号"
 python3 <skill>/scripts/learndb.py export
+python3 <skill>/scripts/learndb.py pref prune
 ```
+
+`pref prune` 检查的"90 天未命中"不是定时任务，它只在被调用的那一刻才生效——
+不调用，这个检查永远不会发生，不管实际过了多久。放进这里就是为了让它有一个
+稳定会被触发的时机（每次完整 checkpoint），而不是指望它自己到点醒来。
 
 两种情况都不代表学习结束——checkpoint 只是把当前进度和观察落盘，教学循环继续。
 
@@ -198,6 +203,10 @@ python3 <skill>/scripts/learndb.py due --topic "<主题>"      # 或列出正在
 - **类比必须带失效边界。**坏类比是后期理解障碍的主要来源。
 - **不要每次都先搜索。**稳定知识直接开讲，见 `references/research.md`。
 - **不要索取账号密码。**需要登录的站点，引导用户自己登录后复用会话。
+- **真的用上一条已生效的 pref 时，顺手 `pref hit --id N`。**这个命令本来就
+  存在（见 `references/evolution.md` 防膨胀一节），但很容易被在教学过程中
+  忘记调用——一旦没人调用，"哪些规则真在起作用"这个防膨胀机制就形同虚设，
+  90天后系统没法区分"真没用的规则"和"有用但没被记录的规则"。
 
 ## 何时读哪个 reference
 

@@ -84,6 +84,24 @@
 见 `evolution.md`。`layer` 区分 L1（用户模型，自动生效）和 L2（教学策略，需两次证据）。
 `polarity` 区分 `works` / `fails`——**失败的教法同样要记**。
 
+`scope` 和 `concept_type`是两个独立的维度，别混着用：`scope` 是"这条规则在
+哪个领域/哪个 atom 生效"（`global` / `domain:数学` / `atom:closure`）；
+`concept_type` 是"这条规则针对哪种**教学情形**"（`notation`=引入新符号、
+`comparison`=对比类比题、`process`=讲解流程步骤、`quantifier`=存在性/全称
+这类措辞精确度、`test-design`=检验题设计……不是穷举，遇到新情形就用新词），
+和 domain 无关——"引入新符号该怎么排讲解顺序"这条规律，不管在学数学还是
+学数据库都适用，只按 `scope` 存会导致它被锁死在第一次发现它的那个 domain
+里，下次别的领域用不上。`pref list --concept-type notation` 能跨 domain
+查到所有同类规则；用 `pref retag --id <id> --concept-type <type>` 给已有
+规则补标签（不算新证据，纯粹补分类）。
+
+规则的前提不再成立时（比如判断依据的环境变了、被证明是错的），用
+`pref retire --id <id> --reason "..."` 标记作废，不要留着和新规则互相矛盾，
+也不要手改 `.db` 删掉它——`retired`/`retired_reason`/`retired_at` 三个字段
+保留审计轨迹。被 retire 的规则会被排除在 `active` 之外，且 `pref add`
+撞到同文本会拒绝复活（提示先看作废理由），逼你想清楚是否真的要用新规则
+覆盖，而不是绕开当初作废的原因。
+
 ### `sessions` — 会话记账
 
 每次结束写 ≤5 行摘要 + 观察到的信号。不要写长篇，长篇没人看也没法聚合。
@@ -201,7 +219,7 @@ R = exp(-t / S)      t = 距上次验证的天数，S = stability
 | `set <slug> k=v ...` | 直接改字段 |
 | `edge add\|rm <from> <to> [--type]` | 维护依赖图 |
 | `misconception add\|list\|resolve` | 误区记录 |
-| `pref add\|list\|hit\|prune` | 教学策略进化 |
+| `pref add\|list\|hit\|prune\|retire` | 教学策略进化；`retire --id --reason` 作废前提不再成立的规则 |
 | `due [--topic]` | 正在衰减的 atom，**仅用户主动要求复习时用** |
 | `session start\|close` | 会话记账 |
 | `profile --set k=v` | 学习者档案 |
