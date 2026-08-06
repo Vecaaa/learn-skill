@@ -74,6 +74,10 @@
 | 导出/备份路径有没有跟上 | `export` 完全不含 goal/phase/project，路线图不在可读快照和 git 备份里 |
 | 每条命令都跑的代码有没有变重 | `migrate()` 每次都 executescript 全量 DDL，`meta.schema_version` 写了却从没被读过 |
 | 有没有误导性的死代码 | `PRAGMA foreign_keys=ON` 但一个 `REFERENCES` 都没声明 |
+| **换了核心公式，依赖它的常数有没有跟着重算** | `recall_prob` 从 `exp(-t/S)` 换成乘方曲线，但 `PROBE_THRESHOLD=0.7` 还是按指数曲线校准的 → 探针触发时刻整整推迟 10.8 倍，核心机制静默失准 |
+| **哨兵值和真实值有没有被混为一谈** | 从未验证过的 atom，`recall_prob` 返回 0.0 表示"没有数据"，但 `update_stability` 把它读成"预期已忘光却答对了→大幅加分" → 首次通过的 stability 被系统性高估 |
+| **新加的分类/标签字段有没有防漂移机制** | `error_type` 写成 `notation`/`Notation`/`notations` 会把同类记录拆散，`distill` 永远达不到阈值 —— 标签看着都在，抽象层实际已失效，且完全无声 |
+| **每次都跑的命令，输出会不会随时间膨胀** | `probe` 每次都带 `teaching_guidance`，其中 `insights` 原本没有条数上限 —— 画像攒到几十条后，每教一个 atom 都要把它们全塞进上下文 |
 
 **2. 检查渐进披露有没有退化。**
 SKILL.md 每次触发都会整份进上下文，所以它只该放"每次教学都用得上"的东西。
@@ -99,7 +103,7 @@ SKILL.md 每次触发都会整份进上下文，所以它只该放"每次教学�
 
 | 文件 | 谁读 | 职责 | 长度约束 |
 |---|---|---|---|
-| `SKILL.md` | Claude，每次触发 | 主循环、硬约束、reference 索引 | 保持 <500 行；已用约 170 |
+| `SKILL.md` | Claude，每次触发 | 主循环、硬约束、reference 索引 | 保持 <500 行；已用 272 |
 | `references/pedagogy.md` | 按需 | 讲解协议、降维梯细节、检验题设计 | 有目录 |
 | `references/research.md` | 按需 | 检索分层、源优先级、防幻觉、登录 | 有目录 |
 | `references/planning.md` | 按需 | 跨月大目标的阶段规划、项目设计、滚动校准 | 有目录 |
@@ -141,7 +145,9 @@ SKILL.md 每次触发都会整份进上下文，所以它只该放"每次教学�
 而非复习任务——只探直接前置、一题定生死、成本十秒。往上追一层就变成
 "我是来学新东西的，你怎么让我做旧题"，用户会关掉这个功能。
 
-**探针触发条件**（`cmd_probe`）：`level <= 2` 或 `recall < 0.7`。
+**探针触发条件**（`cmd_probe`）：`level <= 2` 或 `recall < PROBE_THRESHOLD`
+（当前 0.9；这个值必须和 `recall_prob` 的曲线一起看——乘方曲线下 R=0.9
+恰好解出 t=S，即探针正好在 `stability_days` 天后触发，见决策 19 和第二次复审）。
 level 3 且刚验证过的前置**不探**，否则探针退化成每节课前的例行考试。
 
 ### 4. 不做主动复习 / 不做课前热身复习
@@ -464,11 +470,13 @@ checkpoint，和 `pref prune` 一样有稳定触发点。
 
 | 参数 | 位置 | 当前值 | 调大/调小的效果 |
 |---|---|---|---|
-| `PROBE_THRESHOLD` | learndb.py 顶部 | 0.7 | 调高 → 探针更频繁（更保险但更烦） |
-| `DUE_THRESHOLD` | learndb.py 顶部 | 0.6 | 调高 → 复习列表更长 |
+| `PROBE_THRESHOLD` | learndb.py 顶部 | 0.9 | 调高 → 探针更频繁（更保险但更烦）。**必须和 `recall_prob` 的曲线一起调**：当前乘方曲线下 0.9 恰好让探针在 t=S 触发 |
+| `DUE_THRESHOLD` | learndb.py 顶部 | 0.8 | 调高 → 复习列表更长。须始终 < `PROBE_THRESHOLD`，否则 due 比探针还激进，语义矛盾 |
 | 探针的 level 条件 | `cmd_probe` | `level <= 2` | 改成 `<=3` 会显著增加探针频率 |
-| stability 增长率 | `cmd_verify` | `× (1.4 + 0.25×level)` | 调大 → 认为记得更久，探针更少 |
-| stability 衰减率 | `cmd_verify` | `× 0.4` | 答错后的惩罚力度 |
+| stability 增长/衰减 | `update_stability()` | 见函数内公式（受 difficulty 和检验时的 recall 共同影响） | 调大 → 认为记得更久，探针更少 |
+| difficulty 调整幅度 | `update_difficulty()` | 通过 `-0.3-0.15×ml`／失败 `+0.6-0.1×ml` | 影响 stability 涨跌的放大倍数 |
+| `FIRST_VERIFY_RECALL` | learndb.py 顶部 | 0.9 | 首次验证时代入的 recall。调低 → 首次通过给更大的 stability 涨幅（0.0 会退回被修掉的那个高估 bug） |
+| `MAX_INSIGHTS_IN_GUIDANCE` | learndb.py 顶部 | 8 | `probe` 每次带出的画像条数上限，直接影响每个 atom 的上下文开销 |
 | 止损阈值 | `cmd_verify` | 连续 3 次失败 | 调小 → 更早放弃 |
 | L2 证据门槛 | `cmd_pref` | 2 次 | 调高 → 进化更慢更稳 |
 | 规则过期 | `cmd_pref prune` | 90 天 | — |
@@ -668,5 +676,6 @@ unset LEARN_DB && rm -f /tmp/reg.db
 | 2026-08-05 | **checkpoint 的 signals 深度不足**（同一次读论文会话的后续复盘）。上一条改动解决了"何时触发"，但没解决"触发时写什么"——实测中一个知识点（θ 这个符号）内部发生了多轮追问才真正讲懂，但模型当时跑 checkpoint 时只在 `--signals` 里写了一句单轮印象式总结（"用户是刨根问底型"），没有回顾这条多轮追问链条本身、提炼出"公式该排在类比前面讲"这类可复用的结构性规律——这类规律只有在用户事后明确追问"能学到什么"时才被挖出来，说明模型在教学过程中专注于往下讲，容易漏掉需要跨轮对比才能看出的模式。修法：SKILL.md 第4步 checkpoint 部分补一条——写 `--signals` 时如果某 atom 内部有多轮追问/反复卡住，先回顾整条链条再提炼结构性规律，不要只记单轮印象。用户确认为长期规则。 |
 | 2026-08-05 | **`teaching_prefs` 新增作废机制**（决策 17）。起因：用户在纯终端 Claude Code 里定的"公式用 Unicode 不用 LaTeX"规则被误记成 `scope=global`，同一天在渲染 Markdown 的对话界面里用户要求相反的行为，暴露出旧规则的判断依据（终端不渲染 LaTeX）被错误地当成了普适事实，且系统没有任何方式作废一条已确认前提有误的规则（`prune` 只处理 `active=1`）。修法：`teaching_prefs` 加 `retired`/`retired_reason`/`retired_at`（`SCHEMA_VERSION` 2→3），新增 `pref retire --id --reason`；`pref add` 撞到已作废的同文本规则会拒绝并提示作废理由，不能靠追加证据复活。作废保留审计轨迹，不做真删除（呼应决策 15 的引用完整性思路）。同时作废了库里 4 条围绕这个错误假设的规则，改记到 `profile.formula_notation`（L1，环境条件判断：能渲染 Markdown 用 LaTeX，纯终端用 Unicode）——这类"事实取决于当前运行环境"的偏好本来就该归 L1 用户模型，不该归 L2 教学策略，早期分类本身就错了。冒烟测试 + 回归测试 + 老库迁移测试（模拟无 `retired` 列的旧库）全部通过，`doctor` 无异常。 |
 | 2026-08-05 | **遗忘曲线换成 FSRS 启发的乘方形式 + 独立 difficulty**（决策 19，`SCHEMA_VERSION` 4→5）。用户对比同类开源项目（`claude-tutor` 用 SM-2、`OpenTutor` 扩展 FSRS）后提出。`recall_prob` 从自制的 `exp(-t/S)` 换成 `(1 + t/(9S))^-1`，`S` 从任意衰减常数变成有明确语义的量（记忆概率降到 90% 所需天数）；`atoms` 加 `difficulty`（1~10），`cmd_verify` 改用 `update_difficulty()`/`update_stability()`，采纳 FSRS 的核心洞察——通过检验时的"意外程度"（检验发生时估算的回忆概率越低）决定 stability 涨幅。**明确没做**：没照搬 FSRS 的 17~21 个训练参数（那是数百万条 Anki 记录拟合的，单用户场景无从验证），常数是保守选择并在 docstring 里标注清楚，不要误当成"真正的 FSRS"。回归测试（含决策 16 的 fail-streak 探针检查）+ 老库迁移全过。 |
+| 2026-08-05 | **第二次架构复审**（触发条件：本次会话累计改动 759 行，是 ~100 行阈值的 7 倍）。按流程"先假设有 bug、逐条用命令验证"列了 7 条疑点，**4 条是真 bug、2 条是隐患**，全部已修，并据此给复审疑点清单新增了 4 个类型（见上）。① **`PROBE_THRESHOLD` 语义漂移**（最严重）：`recall_prob` 从指数换成乘方曲线时，没有重算依赖它的 `PROBE_THRESHOLD=0.7`/`DUE_THRESHOLD=0.6`——这两个值是按指数曲线校准的，换曲线后探针触发时刻推迟了 **10.8 倍**（S=2.15 的 atom 从"0.8 天后探"变成"8.2 天后探"），正好命中改动指引里"它以为我会但我早忘了"那条抱怨。修法不是随便调大，而是**让阈值和新曲线的语义对齐**：乘方曲线下 R=0.9 恰好解出 t=S，所以 `PROBE_THRESHOLD=0.9` 让探针正好在 `stability_days` 天后触发，这个字段名从此名副其实；`DUE_THRESHOLD=0.8`（t=2.25S）保持"复习列表比探针晚"的相对关系。② **哨兵值语义混淆**：首次 verify 时 `last_verified` 为空，`recall_prob` 返回 0.0 表示"没有数据"，但 `update_stability` 把低 recall 读作"通过得很意外→记得比预期牢→大幅加 stability"，两种含义混在一起让首次通过的 stability 高估近一倍（2.13 vs 合理的 1.28）。修法：新增 `FIRST_VERIFY_RECALL=0.9`，首次验证时代入它而非 0.0。③ **标签漂移无检测**：`error_type`/`concept_type`/`domain` 写成大小写或单复数不同的变体时，同类记录被拆散、`distill` 永远达不到阈值，而 `doctor` 一声不吭——这是最危险的那种失败（标签看着都在，抽象层已失效）。`doctor` 新增 `tag_drift` 检查（归一化后相同但字面不同即报，带 retag 修复命令）。④ **`export` 漏了新字段**（与第一次复审漏掉路线图同类）：`difficulty`/`error_type`/`concept_type`/引导档位都不在人类可读快照里。⑤ 隐患：`probe` 的 `insights` 无条数上限，而 `probe` 是每个 atom 都跑的命令 → 加 `MAX_INSIGHTS_IN_GUIDANCE=8` 并在超限时提示合并。⑥ 隐患：`distill` 把已 resolve 的误区计入阈值却不标注 → 保留计入（历史证据对提炼画像仍有价值）但在 `source_records` 里加 `resolved` 标记。渐进披露检查：SKILL.md 272 行，未超 500 上限。全套冒烟 + 8 项已修 bug 回归 + 边界用例通过，`doctor` 干净。**另外抓到 6 处文档与代码不一致**（同属静默失效——下一个冷启动的会话会照着过时的数字理解系统）：决策 3 里写死的 `recall < 0.7`、文件职责表里 SKILL.md「已用约 170」（实际 272）、可调参数表里 `PROBE_THRESHOLD`/`DUE_THRESHOLD` 的旧值、以及两条早已被 `update_stability()`/`update_difficulty()` 取代的 stability 增长率/衰减率条目，全部同步；并补上 `FIRST_VERIFY_RECALL`、`MAX_INSIGHTS_IN_GUIDANCE` 这两个新常数。**教训：改常数时顺手 grep 一遍它在文档里的所有出现**——可调参数表尤其容易漏，它是下次想调参的人唯一会看的地方，写着旧值等于主动误导。 |
 | 2026-08-05 | **引导量按 domain 熟练度 + 诊断材料挂到 `probe`**（决策 21，无 schema 变更）。这一项把上一轮列出的方向 A 和 ① 合并实现，因为两者是同一件事的两面（"教之前该知道什么"），且共享同一个可靠挂载点。A：新增 `domain_expertise()`，按该 domain 下 level≥3 的 atom 绝对数分三档（<3 novice / 3–6 developing / ≥7 proficient）决定引导总量——原来只按单个 atom 的 `level` 判断，而新 atom 永远是 level 0，导致每个新知识点都从最完整的四步模板讲起，对已有基础的学习者反而降低理解（专家反转效应）。①：新增 `teaching_guidance()`，把引导档位 + 已提炼的 `insights` + 按 `concept_type` 分组的生效规则一次性挂进 `probe` 的返回——`probe` 是教学循环里每个 atom 都必跑的第一步，是最稳定的挂载点，比"记得先查规律再讲"这种文字指令可靠得多（同决策 18）。`context` 也返回 `domain_expertise`（可跨多个 domain）。`pedagogy.md` 新增"引导总量按领域熟练度定"一节，`SKILL.md` 的探针/讲解两步改写。**顺带修掉两个静默失败**：`probe`/`plan` 传一个不存在的 slug 时原本静默返回空列表（看起来像"没有前置要探/要补"，实际可能只是拼错），现在给干净报错——`probe` 的那处还因为这次新增的 `_col(target, "domain")` 变成了崩溃（`None` 抛 `TypeError`，`_col` 原本只捕 `IndexError`/`KeyError`），一并修了。全套回归 + 边界用例（无 domain 的 atom、空 context、不存在的 slug）通过。 |
 | 2026-08-05 | **抽象层统一设计：`error_type` + `distill`**（决策 20，`SCHEMA_VERSION` 5→6）。用户要求重点优化"教学"而非"复习"方向，第二轮外部研究（专家反转效应、ITS 的 buggy model/error taxonomy、自我解释元分析）后确定做这一项。核心认识：`teaching_prefs` 和 `misconceptions` 存的都是具体记录，跨领域时归零——这是记忆机制最根本的天花板。修法是同一个模式在三处落地（不是三个独立特性）：`misconceptions` 加 `error_type`（对称于上一轮加的 `concept_type`），新增 `misconception retag` 和 `--error-type` 跨域查询；新增 `distill` 命令，把"该提炼成认知画像了"变成能被算出来的状态（记录数够阈值 + `profile` 无对应 `insight:` 条目或条目已过时），输出附带全部原始记录供模型提炼，已挂进完整版 checkpoint（同决策 18 的原则）。**踩到的坑值得记**：第一次给库里 5 条误区打 `error_type` 打出 5 个互不相同的类型，`distill` 一条都触发不了——抽象标签如果每条记录一个就等于没建，判断标准是"补救策略是不是同一套"而非"看起来像不像"；重新归类合并出 `aggregate-vs-instance` 和 `existential-claim` 两类（各 2 条），提炼出库里最初的两条 `insight:`。`pedagogy.md`/`evolution.md`/`memory-schema.md`/`SKILL.md` 同步更新，全套回归 + v4 老库迁移测试通过。 |

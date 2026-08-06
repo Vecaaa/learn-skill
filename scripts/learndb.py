@@ -36,11 +36,28 @@ METHOD_LEVEL = {
 LEVEL_NAME = {
     0: "未学", 1: "见过", 2: "能复述", 3: "能应用", 4: "能迁移",
 }
-PROBE_THRESHOLD = 0.7   # 估算回忆概率低于此值 → 教学前值得探针
-DUE_THRESHOLD = 0.6     # 按需复习模式里认定"已经开始忘"的线
+# 这两个阈值必须和 recall_prob 的曲线形状一起理解，不能单独调。
+# 当前是 FSRS 的乘方曲线 R(t,S) = (1 + t/(9S))^-1，代进去解出触发时刻：
+#   R=0.9 → t = S        （探针：正好是 stability 的定义，"降到90%所需天数"）
+#   R=0.8 → t = 2.25S     （复习列表：比探针晚一倍多）
+# 探针比 due 更早触发是刻意的——代价不对称：多探一题成本十秒，漏探的代价是
+# 讲二十分钟对方一脸茫然。
+#
+# ⚠️ 换 recall_prob 的曲线时**必须重算这两个值**。2026-08-05 从指数曲线
+# exp(-t/S) 换到乘方曲线时漏了这一步，这两个值还是按指数曲线校准的 0.7/0.6，
+# 结果探针触发时刻整整推迟了 10.8 倍（S=2.13 的 atom 从"0.8 天后探"变成
+# "8.2 天后探"），核心机制静默失准。
+PROBE_THRESHOLD = 0.9   # 估算回忆概率低于此值 → 教学前值得探针
+DUE_THRESHOLD = 0.8     # 按需复习模式里认定"已经开始忘"的线
+# 从未验证过的 atom，recall_prob 返回 0.0——那表示"没有数据"，不是
+# "预期已经忘光"。但 update_stability 把低 r 读作"通过得很意外→记得比预期牢
+# →大幅加 stability"，两种含义混在一起会让首次通过的 stability 被系统性高估
+# （实测 2.13 天 vs 合理的 1.28 天）。首次验证时改用这个值代入。
+FIRST_VERIFY_RECALL = 0.9
 DISTILL_MIN_PREFS = 3   # 同一 concept_type 下积累到几条生效 pref，就该提炼成画像
 DISTILL_MIN_MISC = 2    # 同一 error_type 下积累到几条误区，就该提炼成画像
 INSIGHT_PREFIX = "insight:"  # profile 里认知画像条目的命名约定，distill 靠它检测
+MAX_INSIGHTS_IN_GUIDANCE = 8  # probe 每次都带画像，超过这个数就该合并而不是继续堆
 
 
 def now():
@@ -413,10 +430,18 @@ def teaching_guidance(con, domain=None):
     exp = domain_expertise(con, domain)
     if exp:
         g["domain_expertise"] = exp
-    insights = {r["key"][len(INSIGHT_PREFIX):]: r["value"] for r in con.execute(
-        "SELECT key,value FROM profile WHERE key LIKE ?", (INSIGHT_PREFIX + "%",))}
-    if insights:
-        g["insights"] = insights
+    # 有上限：probe 是教学循环里每个 atom 都跑的命令，它的输出会反复进上下文。
+    # 画像本来就该少而精（同 evolution.md 的防膨胀），攒到超过上限说明该合并了。
+    rows = con.execute(
+        "SELECT key,value FROM profile WHERE key LIKE ? ORDER BY updated DESC LIMIT ?",
+        (INSIGHT_PREFIX + "%", MAX_INSIGHTS_IN_GUIDANCE + 1)).fetchall()
+    if rows:
+        g["insights"] = {r["key"][len(INSIGHT_PREFIX):]: r["value"]
+                         for r in rows[:MAX_INSIGHTS_IN_GUIDANCE]}
+        if len(rows) > MAX_INSIGHTS_IN_GUIDANCE:
+            g["insights_truncated"] = (
+                f"画像超过 {MAX_INSIGHTS_IN_GUIDANCE} 条，这里只带了最近更新的几条。"
+                "该合并同类画像了——每条都要占用每次 probe 的上下文预算")
     rules = con.execute(
         "SELECT concept_type, rule FROM teaching_prefs "
         "WHERE active=1 AND retired=0 AND concept_type IS NOT NULL AND concept_type!='' "
@@ -716,7 +741,9 @@ def cmd_verify(a, con):
     ml = METHOD_LEVEL[a.method]
     lvl, stab, streak, status = r["level"], float(r["stability"] or 1.0), r["fail_streak"], r["status"]
     diff = float(_col(r, "difficulty", 5.0) or 5.0)
-    r_now = recall_prob(r["last_verified"], stab)  # 这次检验发生时、更新前的估算回忆概率
+    # 这次检验发生时、更新前的估算回忆概率。首次验证没有 last_verified，
+    # recall_prob 会返回 0.0，但那是"没有数据"而非"预期已忘光"——见 FIRST_VERIFY_RECALL。
+    r_now = recall_prob(r["last_verified"], stab) if r["last_verified"] else FIRST_VERIFY_RECALL
     passed = a.result == "pass"
     diff = update_difficulty(diff, passed, ml)
     stab = update_stability(stab, diff, passed, ml, r_now)
@@ -979,14 +1006,17 @@ def cmd_distill(a, con):
         "SELECT error_type t, COUNT(*) n FROM misconceptions "
         "WHERE error_type IS NOT NULL AND error_type!='' GROUP BY error_type").fetchall()
     for g in groups:
+        # 已 resolve 的误区照样计入：它仍然是"这个学习者在这类问题上栽过"的证据，
+        # 对提炼认知画像有价值。但要标出来，否则模型看不出这条是历史还是现存问题。
         rows = con.execute(
-            "SELECT id,atom_slug,wrong_belief,correction,recurrence,last_seen "
+            "SELECT id,atom_slug,wrong_belief,correction,recurrence,resolved,last_seen "
             "FROM misconceptions WHERE error_type=? ORDER BY recurrence DESC",
             (g["t"],)).fetchall()
         items.append(("error_type", g["t"], g["n"], DISTILL_MIN_MISC,
                       max((r["last_seen"] or "" for r in rows), default=""),
                       [{"id": r["id"], "atom": r["atom_slug"], "wrong": r["wrong_belief"],
-                        "correction": r["correction"], "recurrence": r["recurrence"]}
+                        "correction": r["correction"], "recurrence": r["recurrence"],
+                        "resolved": bool(r["resolved"])}
                        for r in rows]))
 
     pending, ok = [], []
@@ -1089,6 +1119,26 @@ def cmd_doctor(a, con):
             if n > 1:
                 issues.append({"kind": "multiple_current_phases", "detail": g["slug"],
                                "fix": "phase set <id> --field status=upcoming"})
+    # 标签漂移：同一个概念被写成几个字面不同的标签（大小写、单复数、连字符），
+    # 会把本该聚在一起的记录拆散——distill 永远达不到阈值，跨领域查询也漏。
+    # 这是纯静默的失败：标签看着都在，抽象层实际已经失效。
+    def _norm(s):
+        return (s or "").strip().lower().replace("-", "").replace("_", "").replace(" ", "").rstrip("s")
+    for table, col, fix_cmd in (
+            ("misconceptions", "error_type", "misconception retag --id <id> --error-type <统一后的值>"),
+            ("teaching_prefs", "concept_type", "pref retag --id <id> --concept-type <统一后的值>"),
+            ("atoms", "domain", "set <slug> --field domain=<统一后的值>")):
+        vals = [r[0] for r in con.execute(
+            f"SELECT DISTINCT {col} FROM {table} WHERE {col} IS NOT NULL AND {col}!=''")]
+        groups = {}
+        for v in vals:
+            groups.setdefault(_norm(v), []).append(v)
+        for k, variants in groups.items():
+            if len(variants) > 1:
+                issues.append({"kind": "tag_drift", "detail": f"{table}.{col}: " + " / ".join(
+                    repr(v) for v in variants),
+                    "fix": f"这几个标签归一化后是同一个，会让同类记录聚不到一起。用 {fix_cmd} 统一"})
+
     n_atoms = con.execute("SELECT COUNT(*) c FROM atoms").fetchone()["c"]
     n_fts = con.execute("SELECT COUNT(*) c FROM atoms_fts").fetchone()["c"]
     if n_atoms != n_fts:
@@ -1382,27 +1432,32 @@ def cmd_export(a, con):
         rows = con.execute(
             "SELECT * FROM atoms WHERE COALESCE(domain,'(未分类)')=? ORDER BY level DESC, name",
             (d,)).fetchall()
-        lines.append(f"\n## {d}\n")
-        lines.append("| 知识点 | 掌握度 | 估算回忆概率 | 上次验证 | 状态 |")
-        lines.append("|---|---|---|---|---|")
+        exp = domain_expertise(con, None if d == "(未分类)" else d)
+        tier = f"（当前引导档位：**{exp['tier']}**，{exp['applicable']}/{exp['atoms']} 个已达能应用）" if exp else ""
+        lines.append(f"\n## {d}\n{tier}\n")
+        lines.append("| 知识点 | 掌握度 | 估算回忆概率 | 难度 | 上次验证 | 状态 |")
+        lines.append("|---|---|---|---|---|---|")
         for r in rows:
             v = atom_view(r)
             rec = v["recall"] if r["level"] >= 2 else "—"
             lines.append(f"| {r['name']} (`{r['slug']}`) | {v['level_name']} | "
-                         f"{rec} | {(r['last_verified'] or '—')[:10]} | {r['status']} |")
+                         f"{rec} | {_col(r, 'difficulty', '—')} | "
+                         f"{(r['last_verified'] or '—')[:10]} | {r['status']} |")
     misc = con.execute(
         "SELECT * FROM misconceptions WHERE resolved=0 ORDER BY recurrence DESC").fetchall()
     if misc:
         lines.append("\n## 未解决的理解误区\n")
         for m in misc:
-            lines.append(f"- **{m['atom_slug'] or '通用'}** — 误：{m['wrong_belief']}　→　"
+            et = f"［{m['error_type']}］" if _col(m, "error_type") else ""
+            lines.append(f"- **{m['atom_slug'] or '通用'}**{et} — 误：{m['wrong_belief']}　→　"
                          f"正：{m['correction']}（出现 {m['recurrence']} 次）")
     prefs = con.execute("SELECT * FROM teaching_prefs WHERE active=1").fetchall()
     if prefs:
         lines.append("\n## 生效中的教学策略\n")
         for p in prefs:
             mark = "✅" if p["polarity"] == "works" else "🚫"
-            lines.append(f"- {mark} [{p['scope']}] {p['rule']}（证据 {p['evidence_count']} 次）")
+            ct = f"［{p['concept_type']}］" if _col(p, "concept_type") else ""
+            lines.append(f"- {mark} [{p['scope']}]{ct} {p['rule']}（证据 {p['evidence_count']} 次）")
 
     # 路线图必须进快照——它是跨月计划的可读视图和 git 备份路径。
     # 早期版本这里完全没有 goal/phase/project，导出的 knowledge.md 看不出
