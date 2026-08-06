@@ -120,6 +120,12 @@ python3 <skill>/scripts/learndb.py session close --atoms <slug...> \
     --summary "≤5 行" --signals "观察到的教学信号"
 ```
 
+**写 `--signals` 时不要只写单轮印象**（比如"用户觉得难""用户是刨根问底型"这种
+一句话概括）。如果某个 atom 内部有过多轮追问/反复卡住，先回顾一下**整条追问链条**，
+提炼出"什么顺序/什么讲法真正让理解落地"这类可复用的结构性规律，再写进去。
+单轮印象容易记录但价值低；结构性规律往往要跨轮对比才能看出来，
+不主动回顾就会漏掉——这正是它容易被漏记的原因。
+
 **b) 用户随时手动触发的完整版**：用户说"先存一下进度"之类的话时，
 除了上面的 `session close`，还要跑一次 `export`，并按
 `references/evolution.md` 的门槛判断要不要写 `pref`：
@@ -211,7 +217,7 @@ python3 <skill>/scripts/learndb.py due --topic "<主题>"      # 或列出正在
 ```
 status  context <topic>  find <q>  get <slug>  probe <slug>  plan <slug>
 add <slug> <name> [--prereq ...] [--phase id]   verify <slug> --result --method
-misconception add|list|resolve     pref add|list|prune
+misconception add|list|resolve     pref add|list|prune|retire
 due [--topic]   session start|close   profile --set k=v   export   backup
 
 goal add|list|get|set|roadmap             大目标（跨月计划）

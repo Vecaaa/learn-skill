@@ -298,6 +298,36 @@ recall 却是满值 → **`probe` 认为这个前置很牢固，直接跳过**�
 早期 `cmd_get` 就自己另算了一遍，导致同一个 atom 在 `get` 和 `probe` 里
 显示两个不同的 recall。
 
+### 17. `teaching_prefs` 需要一个"作废"状态，不能只靠 90 天 prune
+
+**为什么**：2026-08-05 实战中撞见一个真实场景——用户在纯终端跑的 Claude Code
+里明确要求"数学符号用 Unicode，不用 LaTeX"（当时的判断依据：终端不渲染
+LaTeX），这条被记成了 `scope=global` 的 L2 规则。同一天，用户在一个能渲染
+Markdown/KaTeX 的对话界面里要求反过来用 LaTeX。旧规则的判断依据（终端环境）
+被错误地写成了全局适用，新指令和旧规则直接打架，而 `prune` 完全帮不上忙——
+它只处理 `active=1` 的规则，这几条还没攒够两次证据，压根不是 active。
+
+不作废的话，这类"前提本身错了"的规则会永久留在候选池里，`pref add`
+撞到同文本还可能继续累加证据把它转正，把一个已知的错误判断固化成正式规则。
+
+**修法**：给 `teaching_prefs` 加 `retired`/`retired_reason`/`retired_at` 三列
+（`SCHEMA_VERSION` 3→3，2026-08-05 这次改的），新增 `pref retire --id --reason`
+子命令：置 `active=0` 的同时标 `retired=1` 并写明理由。`cmd_pref` 的 `add`
+分支加了一道守卫——撞到 `retired=1` 的同文本规则时拒绝追加证据，报错里带上
+作废理由，逼你写一条新规则而不是绕开当初作废它的原因。
+
+**没有做的**：没有加"删除"命令。作废保留审计轨迹（能看到"这条规则存在过、
+为什么被废"），删除会丢失这个历史，而这个系统里"静默丢信息"一直是要避免的
+（同决策 15 的引用完整性思路——宁可多一条状态字段，不做真删除）。
+
+**顺带修的数据**：库里 4 条围绕这个假设的规则（"数学符号用纯文本不用 LaTeX"
+以及两条"用 Unicode 不用 LaTeX"）全部 retire，改记到 `profile.formula_notation`
+这个 L1 字段里，且写成了**环境条件判断**（能渲染 Markdown 的界面用 LaTeX，
+纯终端用 Unicode），而不是又立一条同样会过期的全局断言。这类"事实取决于当前
+运行环境"的偏好，本来就该进 `profile`（L1，直接生效），不该进
+`teaching_prefs`（L2，是"对这个用户有效的教学策略"，不是"当前会话的渲染能力
+是什么"）——早期把这条记成 L2 教学策略本身就是归类错误，不只是措辞问题。
+
 ---
 
 ## 可调参数
@@ -336,6 +366,7 @@ recall 却是满值 → **`probe` 认为这个前置很牢固，直接跳过**�
 | "每次都要先搜半天" | research.md 第一决策表（稳定 vs 易变） |
 | "反馈过的问题下次照犯" | evolution.md 的信号采集表；证据门槛可能太高 |
 | "规则越来越乱" | evolution.md 防膨胀；跑 `pref prune` |
+| "两条规则互相矛盾" / "这条规则的前提已经不成立了" | `pref retire --id --reason` 作废旧规则（决策 17），别留着和新规则打架，也别手改 `.db` 删掉 |
 | 想加新的库能力 | `scripts/learndb.py` 加子命令 + memory-schema.md 命令全表 |
 | 触发不准（该用没用/不该用却用了） | SKILL.md frontmatter 的 `description` |
 | "路线图怎么每次都要重新问一遍" | 检查是不是漏了 `goal add`/`phase add` 落库这一步（见决策 10 附近的"关键规则"） |
@@ -447,6 +478,10 @@ python3 learndb.py phase get some-slug
 python3 learndb.py get adv
 # ⑥ doctor 必须报出那条悬空边
 python3 learndb.py doctor
+# ⑦ 被 retire 的规则不能靠同文本证据复活
+python3 learndb.py pref add --rule "临时规则" --scope "global" --evidence e1
+python3 learndb.py pref retire --id 1 --reason "回归测试"
+python3 learndb.py pref add --rule "临时规则" --scope "global" --evidence e2   # 应报错，不能悄悄转正
 unset LEARN_DB && rm -f /tmp/reg.db
 ```
 
@@ -497,3 +532,5 @@ unset LEARN_DB && rm -f /tmp/reg.db
 | 2026-08-03 | 大目标模式：新增 `goals`/`phases`/`projects`/`project_atoms` 四张表 + `atoms.phase_id` 列，`learndb.py` 新增 `goal`/`phase`/`project` 三组命令，`migrate()` 支持老库无损升级。里程碑用验收标准而非日历、近详远粗、结束时滚动校准时间估计（见决策 11）；项目复用 `verify` 的 transfer 机制而非另起掌握度判定（决策 12）。SKILL.md 新增「大目标模式」整节；`domains.md` 新增"先查现成阶梯式项目课程"一节。路线图强制要求落库，不能只停留在对话里。 |
 | 2026-08-03 | **第一次架构复审**（建立了[大改动后必须做架构复审](#️-大改动后必须做架构复审)这个长期机制）。在冒烟测试全绿的版本里查出 5 个真 bug + 4 个架构问题，全部已修：**① 失败的检验被探针无视**（`fail` 刷新 `last_verified` → recall=1.0 → probe 跳过刚答错的前置，核心机制失效，决策 16）；② `--prereq` 拼错静默建悬空边、`probe` 的 JOIN 直接丢掉 → 探针永久空转（决策 15）；③ `project add` 可挂到不存在的 phase；④ `phase get <非数字>` 抛 traceback；⑤ `phases.seq` 可重复 → `close` 推进到不确定阶段。架构侧：⑥ `export` 补上路线图章节（此前 knowledge.md 和 git 备份完全不含 goal/phase/project）；⑦ SKILL.md 293→204 行，大目标模式下沉到 `references/planning.md`，恢复渐进披露；⑧ `migrate()` 改用 `meta.schema_version` 走快速路径（此前每条命令都重跑全量 DDL，且 schema_version 写了从没被读过）；⑨ 移除误导性的 `PRAGMA foreign_keys=ON`（零 FK 声明）。新增 `doctor` 命令做数据完整性体检，`SCHEMA_VERSION=2`。 |
 | 2026-08-05 | **收尾流程补上随时可触发的 checkpoint**（用户实战反馈：读论文会话中途多次给教学方式反馈，模型嘴上答应"记进 pref"但当场没调用命令，追问后才补上）。根因是 SKILL.md 第4步"收尾"只写了"会话结束时做一次"，隐式信号（用户没直说、模型观察到的模式）只有归纳成 pref 候选才落库，若一直拖到对话被压缩摘要或用户直接关闭，这部分观察会在从未落库的情况下丢失（显式的 `verify`/`misconception add`/`pref add` 本身不受影响，一直是当场写库）。修法：SKILL.md 第4步改为"两种触发缺一不可"——① 模型每教完1-2个atom或对话变长时静默做轻量 `session close`；② 用户随时手动喊"存一下进度"时跑完整版（`session close`+`export`+按门槛写`pref`）。两种触发都不代表学习结束，只是把进度和观察落盘。用户在 [CLAUDE.md 决策7](#7-自进化分三层-l2-需两次证据) 的框架下明确确认了这条 L3 改动。 |
+| 2026-08-05 | **checkpoint 的 signals 深度不足**（同一次读论文会话的后续复盘）。上一条改动解决了"何时触发"，但没解决"触发时写什么"——实测中一个知识点（θ 这个符号）内部发生了多轮追问才真正讲懂，但模型当时跑 checkpoint 时只在 `--signals` 里写了一句单轮印象式总结（"用户是刨根问底型"），没有回顾这条多轮追问链条本身、提炼出"公式该排在类比前面讲"这类可复用的结构性规律——这类规律只有在用户事后明确追问"能学到什么"时才被挖出来，说明模型在教学过程中专注于往下讲，容易漏掉需要跨轮对比才能看出的模式。修法：SKILL.md 第4步 checkpoint 部分补一条——写 `--signals` 时如果某 atom 内部有多轮追问/反复卡住，先回顾整条链条再提炼结构性规律，不要只记单轮印象。用户确认为长期规则。 |
+| 2026-08-05 | **`teaching_prefs` 新增作废机制**（决策 17）。起因：用户在纯终端 Claude Code 里定的"公式用 Unicode 不用 LaTeX"规则被误记成 `scope=global`，同一天在渲染 Markdown 的对话界面里用户要求相反的行为，暴露出旧规则的判断依据（终端不渲染 LaTeX）被错误地当成了普适事实，且系统没有任何方式作废一条已确认前提有误的规则（`prune` 只处理 `active=1`）。修法：`teaching_prefs` 加 `retired`/`retired_reason`/`retired_at`（`SCHEMA_VERSION` 2→3），新增 `pref retire --id --reason`；`pref add` 撞到已作废的同文本规则会拒绝并提示作废理由，不能靠追加证据复活。作废保留审计轨迹，不做真删除（呼应决策 15 的引用完整性思路）。同时作废了库里 4 条围绕这个错误假设的规则，改记到 `profile.formula_notation`（L1，环境条件判断：能渲染 Markdown 用 LaTeX，纯终端用 Unicode）——这类"事实取决于当前运行环境"的偏好本来就该归 L1 用户模型，不该归 L2 教学策略，早期分类本身就错了。冒烟测试 + 回归测试 + 老库迁移测试（模拟无 `retired` 列的旧库）全部通过，`doctor` 无异常。 |
