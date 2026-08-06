@@ -98,12 +98,19 @@ python3 <skill>/scripts/learndb.py verify <slug> --result pass --method transfer
 ```
 
 `--phrasing` 值得每次都填：后续教学复用用户自己的措辞和心智模型，理解成本明显下降。
-答错时同时记误区（用户的**原话**比你的概括有用得多）：
+答错时同时记误区（用户的**原话**比你的概括有用得多），并打上 `--error-type`：
 
 ```bash
 python3 <skill>/scripts/learndb.py misconception add --atom <slug> \
-    --wrong "用户当时的错误说法" --correction "正确的版本"
+    --wrong "用户当时的错误说法" --correction "正确的版本" \
+    --error-type <跨领域的错误模式>
 ```
+
+`--error-type` 是这条错误属于哪种**跨领域**的思维偏差（`quantifier`、
+`type-mismatch`、`causal-inversion`、`aggregate-vs-instance`……不是穷举，
+遇到新模式就用新词）。只存具体误区的话，换个领域碰到同类错误完全不会被预防。
+**粒度要能复用**：如果每条误区都得到一个独一无二的类型，说明打得太细了，
+这个抽象层就没起作用——判断标准是"这两条错误的补救策略是不是同一套"。
 
 ### 4. 收尾与 checkpoint（不要只在对话真正结束时才做一次）
 
@@ -135,11 +142,20 @@ python3 <skill>/scripts/learndb.py session close --atoms <slug...> \
     --summary "≤5 行" --signals "观察到的教学信号"
 python3 <skill>/scripts/learndb.py export
 python3 <skill>/scripts/learndb.py pref prune
+python3 <skill>/scripts/learndb.py distill
 ```
 
 `pref prune` 检查的"90 天未命中"不是定时任务，它只在被调用的那一刻才生效——
 不调用，这个检查永远不会发生，不管实际过了多久。放进这里就是为了让它有一个
 稳定会被触发的时机（每次完整 checkpoint），而不是指望它自己到点醒来。
+
+`distill` 同理，但做的是另一件事：**把攒够了的同类具体记录提炼成认知画像**。
+它返回的 `pending` 里每一项都附带该类型下的全部原始记录——读完写一句概括的、
+可执行的特征进 `profile`（`profile --set "insight:<type>=..."`）。为什么要这一步：
+`pref` 和 `misconception` 都是具体记录，只在你查到对应 scope/atom 时才用得上；
+碰到全新领域、没有任何现成记录匹配时，这些积累帮不上忙。`profile` 每次
+`context`/`status` 都会自动带出来，提炼进去的特征才能在新情形下提供方向。
+`pending` 为空说明还没积累够，**不要硬凑**——凑出来的画像是噪声。
 
 两种情况都不代表学习结束——checkpoint 只是把当前进度和观察落盘，教学循环继续。
 
@@ -226,8 +242,9 @@ python3 <skill>/scripts/learndb.py due --topic "<主题>"      # 或列出正在
 ```
 status  context <topic>  find <q>  get <slug>  probe <slug>  plan <slug>
 add <slug> <name> [--prereq ...] [--phase id]   verify <slug> --result --method
-misconception add|list|resolve     pref add|list|prune|retire
+misconception add|list|resolve|retag [--error-type]   pref add|list|prune|retire|retag
 due [--topic]   session start|close   profile --set k=v   export   backup
+distill                                   检测哪些类型该提炼成认知画像了
 
 goal add|list|get|set|roadmap             大目标（跨月计划）
 phase add|list|get|set|start|close        里程碑（近详远粗 + 结束时滚动校准）

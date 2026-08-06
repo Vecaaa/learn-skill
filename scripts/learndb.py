@@ -38,6 +38,9 @@ LEVEL_NAME = {
 }
 PROBE_THRESHOLD = 0.7   # 估算回忆概率低于此值 → 教学前值得探针
 DUE_THRESHOLD = 0.6     # 按需复习模式里认定"已经开始忘"的线
+DISTILL_MIN_PREFS = 3   # 同一 concept_type 下积累到几条生效 pref，就该提炼成画像
+DISTILL_MIN_MISC = 2    # 同一 error_type 下积累到几条误区，就该提炼成画像
+INSIGHT_PREFIX = "insight:"  # profile 里认知画像条目的命名约定，distill 靠它检测
 
 
 def now():
@@ -123,7 +126,7 @@ def update_stability(s_old, difficulty, passed, ml, r_now):
 
 # schema 版本。加表/加列时 +1，并在 migrate() 里补上对应的升级动作。
 # migrate() 靠它走快速路径，避免每条命令都重跑一遍全量 DDL。
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def connect():
@@ -230,6 +233,7 @@ CREATE TABLE IF NOT EXISTS misconceptions (
     atom_slug TEXT,
     wrong_belief TEXT NOT NULL,  -- 用户当时的错误说法，尽量保留原话
     correction TEXT NOT NULL,
+    error_type TEXT,             -- 跨领域错误模式：quantifier/type-mismatch/causal-inversion 等
     first_seen TEXT, last_seen TEXT,
     recurrence INTEGER DEFAULT 1,
     resolved INTEGER DEFAULT 0
@@ -311,6 +315,9 @@ def migrate(con):
         con.execute("ALTER TABLE teaching_prefs ADD COLUMN retired_at TEXT")
     if "concept_type" not in pref_cols:
         con.execute("ALTER TABLE teaching_prefs ADD COLUMN concept_type TEXT")
+    misc_cols = {r[1] for r in con.execute("PRAGMA table_info(misconceptions)")}
+    if misc_cols and "error_type" not in misc_cols:
+        con.execute("ALTER TABLE misconceptions ADD COLUMN error_type TEXT")
     con.executescript(SCHEMA)  # 全部 IF NOT EXISTS，重复执行安全
     con.execute("INSERT INTO meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
@@ -679,29 +686,54 @@ def cmd_edge(a, con):
 
 
 def cmd_misconception(a, con):
+    """具体误区 + 跨领域的抽象错误类型（`error_type`）。
+
+    `wrong_belief` 存用户原话（具体、不可迁移），`error_type` 存这条错误
+    属于哪种**跨领域**的思维模式——"量词混淆""把对整体的陈述套到个体上"
+    这类模式在任何学科都会重犯。只存具体误区的话，换个领域碰到同类错误
+    完全不会被预防；有了类型标签，`--error-type` 能跨 domain 查出同类，
+    `distill` 也能据此提炼成认知画像。设计上对称于 `teaching_prefs.concept_type`。
+    """
     if a.action == "add":
         old = con.execute(
             "SELECT id,recurrence FROM misconceptions WHERE atom_slug=? AND wrong_belief=?",
             (a.atom, a.wrong)).fetchone()
         if old:
             con.execute("UPDATE misconceptions SET recurrence=recurrence+1, last_seen=?, "
-                        "resolved=0 WHERE id=?", (now(), old["id"]))
+                        "resolved=0, error_type=COALESCE(?,error_type) WHERE id=?",
+                        (now(), a.error_type, old["id"]))
             mid = old["id"]
         else:
             cur = con.execute(
-                "INSERT INTO misconceptions(atom_slug,wrong_belief,correction,first_seen,last_seen) "
-                "VALUES(?,?,?,?,?)", (a.atom, a.wrong, a.correction, now(), now()))
+                "INSERT INTO misconceptions(atom_slug,wrong_belief,correction,error_type,"
+                "first_seen,last_seen) VALUES(?,?,?,?,?,?)",
+                (a.atom, a.wrong, a.correction, a.error_type, now(), now()))
             mid = cur.lastrowid
         con.commit()
-        out({"ok": True, "id": mid, "note": "复发次数高的误区，下次教到相关内容时主动提前拆解"})
+        res = {"ok": True, "id": mid,
+               "note": "复发次数高的误区，下次教到相关内容时主动提前拆解"}
+        if not a.error_type:
+            res["warning"] = ("没给 --error-type。具体误区只在这个 atom 上有用，"
+                              "打上跨领域的错误类型（quantifier / type-mismatch / "
+                              "causal-inversion / ignoring-probability 等）才能在别的领域预防同类错误")
+        out(res)
+    elif a.action == "retag":
+        if not a.id or not a.error_type:
+            out({"error": "retag 需要 --id 和 --error-type"}); return
+        con.execute("UPDATE misconceptions SET error_type=? WHERE id=?", (a.error_type, a.id))
+        con.commit(); out({"ok": True, "id": a.id, "error_type": a.error_type})
     elif a.action == "resolve":
         con.execute("UPDATE misconceptions SET resolved=1 WHERE id=?", (a.id,))
         con.commit(); out({"ok": True, "id": a.id})
     else:
+        # --error-type 跨 domain 查同类错误模式（不限定 atom），这是它相对
+        # --atom 的意义所在：换个领域教新东西前，先看看这类错误以前怎么犯的
         rows = con.execute(
             "SELECT * FROM misconceptions WHERE (?='' OR atom_slug LIKE ?) "
+            "AND (?='' OR error_type=?) "
             "AND (resolved=0 OR ?=1) ORDER BY recurrence DESC, last_seen DESC LIMIT 50",
-            (a.atom or "", f"%{a.atom or ''}%", 1 if a.all else 0)).fetchall()
+            (a.atom or "", f"%{a.atom or ''}%", a.error_type or "", a.error_type or "",
+             1 if a.all else 0)).fetchall()
         out([dict(r) for r in rows])
 
 
@@ -818,6 +850,85 @@ def cmd_pref(a, con):
             "ORDER BY active DESC, evidence_count DESC",
             (1 if a.all else 0, a.concept_type or "", a.concept_type or "")).fetchall()
         out([dict(r) for r in rows])
+
+
+def cmd_distill(a, con):
+    """检测哪些 concept_type / error_type 已经积累够了、该提炼成认知画像。
+
+    **为什么需要这个命令**：`teaching_prefs` 和 `misconceptions` 存的都是具体
+    记录，只有在你主动查询到对应的 scope/atom 时才会被用上。碰到一个全新的、
+    没有任何现成记录匹配的情形时，这些积累完全帮不上忙——只能凭本能重新试错。
+    把同类记录提炼成一句更概括的认知特征写进 `profile`（L1，每次 `context`
+    /`status` 都会自动带出来，不需要主动查），新情形才有方向可循。
+
+    **为什么是命令而不是写在 SKILL.md 里的提醒**：同决策 18——"记得定期提炼"
+    这种纯文字指令不可能被可靠执行。这个命令把"该提炼了"变成一个**能被算出来**
+    的状态：记录数够阈值、且 profile 里没有对应画像（或画像比最新记录旧），
+    就报出来。它自己不做提炼（那是判断性工作，只有模型能做），但它保证
+    "需要提炼"这件事不会因为没人想起来而永远不发生。
+
+    输出里带每个待提炼类型下的**全部具体记录**，读完直接写 profile：
+        profile --set "insight:notation=<提炼出的一句话>"
+    """
+    prof = {r["key"]: r for r in con.execute("SELECT key,value,updated FROM profile")}
+    items = []
+
+    groups = con.execute(
+        "SELECT concept_type t, COUNT(*) n FROM teaching_prefs "
+        "WHERE active=1 AND retired=0 AND concept_type IS NOT NULL AND concept_type!='' "
+        "GROUP BY concept_type").fetchall()
+    for g in groups:
+        rows = con.execute(
+            "SELECT id,scope,rule,polarity,evidence,created FROM teaching_prefs "
+            "WHERE active=1 AND retired=0 AND concept_type=? ORDER BY evidence_count DESC",
+            (g["t"],)).fetchall()
+        items.append(("concept_type", g["t"], g["n"], DISTILL_MIN_PREFS,
+                      max((r["created"] or "" for r in rows), default=""),
+                      [{"id": r["id"], "scope": r["scope"], "rule": r["rule"],
+                        "polarity": r["polarity"]} for r in rows]))
+
+    groups = con.execute(
+        "SELECT error_type t, COUNT(*) n FROM misconceptions "
+        "WHERE error_type IS NOT NULL AND error_type!='' GROUP BY error_type").fetchall()
+    for g in groups:
+        rows = con.execute(
+            "SELECT id,atom_slug,wrong_belief,correction,recurrence,last_seen "
+            "FROM misconceptions WHERE error_type=? ORDER BY recurrence DESC",
+            (g["t"],)).fetchall()
+        items.append(("error_type", g["t"], g["n"], DISTILL_MIN_MISC,
+                      max((r["last_seen"] or "" for r in rows), default=""),
+                      [{"id": r["id"], "atom": r["atom_slug"], "wrong": r["wrong_belief"],
+                        "correction": r["correction"], "recurrence": r["recurrence"]}
+                       for r in rows]))
+
+    pending, ok = [], []
+    for kind, t, n, need, newest, records in items:
+        key = INSIGHT_PREFIX + t
+        existing = prof.get(key)
+        if n < need and not existing:
+            continue  # 还没积累够，不用管
+        # 已有画像但之后又攒了新记录 → 画像过时了，值得重写
+        stale = bool(existing and newest and (existing["updated"] or "") < newest)
+        if existing and not stale:
+            ok.append({"kind": kind, "type": t, "records": n,
+                       "insight": existing["value"]})
+            continue
+        pending.append({
+            "kind": kind, "type": t, "records": n, "threshold": need,
+            "reason": "已有画像但之后又新增了记录，值得重写" if stale else "首次达到提炼阈值",
+            "current_insight": existing["value"] if existing else None,
+            "write_to": key,
+            "source_records": records,
+        })
+
+    out({
+        "pending": pending,
+        "up_to_date": ok,
+        "hint": ("对 pending 里每一项：读完 source_records，提炼成一句可执行的认知特征"
+                 "（说清楚'该怎么教'而不是'用户是什么样的人'），然后 "
+                 f"`profile --set \"{INSIGHT_PREFIX}<type>=<提炼结果>\"`。"
+                 "pending 为空说明暂时没有够格提炼的类型，不要硬凑。"),
+    })
 
 
 def cmd_due(a, con):
@@ -1333,10 +1444,19 @@ def main():
     p.set_defaults(fn=cmd_edge)
 
     p = sub.add_parser("misconception", help="记录/查询用户的具体错误理解")
-    p.add_argument("action", choices=["add", "list", "resolve"])
+    p.add_argument("action", choices=["add", "list", "resolve", "retag"])
     p.add_argument("--atom"); p.add_argument("--wrong"); p.add_argument("--correction")
     p.add_argument("--id", type=int); p.add_argument("--all", action="store_true")
+    p.add_argument("--error-type", dest="error_type",
+                   help="跨领域的错误模式，独立于 atom：这条错误属于哪种思维偏差，"
+                        "而不是出在哪个知识点。常见值：quantifier(存在性/全称混淆)、"
+                        "type-mismatch(把对整体的陈述套到个体上)、causal-inversion"
+                        "(因果或顺序倒置)、ignoring-probability(只看典型路径不看期望)。"
+                        "list 时可用同一参数跨 domain 查同类错误")
     p.set_defaults(fn=cmd_misconception)
+
+    p = sub.add_parser("distill", help="检测哪些 concept_type/error_type 该提炼成认知画像了")
+    p.set_defaults(fn=cmd_distill)
 
     p = sub.add_parser("pref", help="教学策略进化（L1 自动 / L2 需两次证据）")
     p.add_argument("action", choices=["add", "list", "hit", "prune", "retire", "retag"])
