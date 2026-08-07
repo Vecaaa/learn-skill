@@ -1210,11 +1210,14 @@ def _phase_id(a):
         return None
 
 
-def cmd_doctor(a, con):
-    """数据完整性体检。表结构里没有外键约束（加 FK 要重建已有表，代价大于收益），
-    所以引用完整性靠写入时校验 + 这个命令定期兜底。
+def collect_structural_issues(con):
+    """代码能**确定判定对错**的完整性问题。`doctor` 和 `review` 共用这一份实现——
+    两处各写一遍就是复审清单里那个"同一个概念两处实现"的坑。
 
-    大改动之后、或者觉得探针/进度显示不对劲时跑一下。
+    这里只放确定性判断。"这两条误区看起来可能不是一类"那种需要语义理解的疑点
+    不属于这里，它们走 `review` 的 needs_judgment——混进来会毁掉 doctor 的
+    强承诺：`issue_count: 0` 现在的含义是"确定没问题"，一旦掺入待确认的疑点，
+    这个数字就没法解读了。
     """
     issues = []
     for e in con.execute("SELECT from_slug,to_slug,type FROM edges"):
@@ -1279,6 +1282,17 @@ def cmd_doctor(a, con):
         issues.append({"kind": "fts_out_of_sync",
                        "detail": f"atoms={n_atoms} 但 atoms_fts={n_fts}",
                        "fix": "learndb.py doctor --repair-fts（中文模糊查找会漏结果）"})
+    return issues
+
+
+def cmd_doctor(a, con):
+    """数据完整性体检。表结构里没有外键约束（加 FK 要重建已有表，代价大于收益），
+    所以引用完整性靠写入时校验 + 这个命令定期兜底。
+
+    大改动之后、或者觉得探针/进度显示不对劲时跑一下。
+    需要**语义层面**的体检（分类打错、画像过时、规则互相矛盾）用 `review`。
+    """
+    issues = collect_structural_issues(con)
     if a.repair_fts:
         reindex(con); con.commit()
         issues = [i for i in issues if i["kind"] != "fts_out_of_sync"]
@@ -1288,6 +1302,152 @@ def cmd_doctor(a, con):
          "schema_version": SCHEMA_VERSION,
          "hint": "全部为空说明数据完整性没问题" if not issues else
                  "按每条的 fix 处理；这些问题不会自己消失，而且大多是静默失败"})
+
+
+def cmd_review(a, con):
+    """完整体检：用户主动要求"检查一下知识库"时跑这个。
+
+    **和 `doctor` 的分工**：`doctor` 只做代码能确定判定的结构检查；`review`
+    在此之上加两类 `doctor` 结构上做不了的东西——需要**语义判断**的疑点
+    （分类打错、画像过时、规则互相矛盾），以及**值得看一眼但不算错**的状态。
+    三类严格分开，因为它们的可信度不同：structural 是确定的问题，
+    needs_judgment 是待人工/模型确认的材料，attention 只是提醒。
+
+    **为什么挂在用户主动请求上**：这类检查需要判断力、消耗上下文，不适合高频
+    自动跑；而这个系统一路踩的最大的坑就是依赖模型记得做某件事（决策 18）。
+    用户开口是 100% 可靠的触发器，比任何写在 SKILL.md 里的提醒都强。
+
+    代码只负责**把材料摆出来**，判断留给模型——同 `distill` 的思路。
+    """
+    res = {}
+
+    issues = collect_structural_issues(con)
+    res["structural"] = {"count": len(issues), "issues": issues,
+                         "note": "代码确定判定的问题，按每条的 fix 直接处理"}
+
+    # ---- 需要语义判断的材料 ----
+    judgment = {}
+
+    # ① 分类同质性：doctor 只能查拼写漂移（notation vs Notation），查不出
+    # "把 causal-inversion 错打成 quantifier" 这种语义错误。后果是双向的：
+    # 打进去的那类被污染（distill 从混杂记录里提炼出模糊画像，而画像是全局
+    # 生效的），本该属于的那类饿死（永远达不到提炼阈值）。
+    cohesion = []
+    for t, in con.execute("SELECT DISTINCT error_type FROM misconceptions "
+                          "WHERE error_type IS NOT NULL AND error_type!=''"):
+        rows = con.execute(
+            "SELECT id,atom_slug,wrong_belief,correction FROM misconceptions "
+            "WHERE error_type=? ORDER BY recurrence DESC LIMIT ?", (t, a.limit)).fetchall()
+        if len(rows) > 1:
+            cohesion.append({"kind": "error_type", "type": t,
+                             "records": [{"id": r["id"], "atom": r["atom_slug"],
+                                          "wrong": r["wrong_belief"],
+                                          "correction": r["correction"]} for r in rows]})
+    for t, in con.execute("SELECT DISTINCT concept_type FROM teaching_prefs "
+                          "WHERE concept_type IS NOT NULL AND concept_type!='' AND retired=0"):
+        rows = con.execute(
+            "SELECT id,scope,rule FROM teaching_prefs WHERE concept_type=? AND retired=0 "
+            "ORDER BY evidence_count DESC LIMIT ?", (t, a.limit)).fetchall()
+        if len(rows) > 1:
+            cohesion.append({"kind": "concept_type", "type": t,
+                             "records": [dict(r) for r in rows]})
+    if cohesion:
+        judgment["tag_cohesion"] = {
+            "groups": cohesion,
+            "ask": "逐组看：这些记录真的是同一类吗？判断标准是**补救策略是不是同一套**，"
+                   "不是'看起来像不像'。混进来的用 `misconception retag` / `pref retag` 挪走。"}
+
+    # ② 画像是否还准确：画像写进 profile 后每次 probe 都生效，但从没有任何
+    # 机制回头验证它当初的提炼是否仍然成立（distill 只在有新记录时才提示重写）。
+    insights = []
+    for r in con.execute("SELECT key,value,updated FROM profile WHERE key LIKE ?",
+                         (INSIGHT_PREFIX + "%",)):
+        t = r["key"][len(INSIGHT_PREFIX):]
+        hits, misses = feedback_counts(con, "insight", t)
+        src = [x[0] for x in con.execute(
+            "SELECT wrong_belief FROM misconceptions WHERE error_type=? LIMIT ?",
+            (t, a.limit))] or [x[0] for x in con.execute(
+            "SELECT rule FROM teaching_prefs WHERE concept_type=? AND retired=0 LIMIT ?",
+            (t, a.limit))]
+        insights.append({"type": t, "insight": r["value"], "written": (r["updated"] or "")[:10],
+                         "hits": hits, "misses": misses, "based_on": src})
+    if insights:
+        judgment["insight_accuracy"] = {
+            "items": insights,
+            "ask": "对每条：底下的 based_on 记录还支持这句画像吗？misses 明显多于 hits 的"
+                   "说明照它教反而更糟。要改就 `profile --set \"insight:<type>=...\"` 重写。"}
+
+    # ③ 规则互相矛盾：evolution.md 开篇就把"前后矛盾"列为自进化的头号风险
+    # （"多举例子"和"别啰嗦"同时生效），但至今没有任何检测——规则攒到几十条
+    # 之后这几乎必然发生，且完全无声。
+    rules = con.execute(
+        "SELECT id,scope,concept_type,rule,polarity FROM teaching_prefs "
+        "WHERE active=1 AND retired=0 ORDER BY scope,concept_type").fetchall()
+    if len(rules) > 1:
+        judgment["rule_conflicts"] = {
+            "active_rules": [dict(r) for r in rules],
+            "ask": "有没有两条在同一场合会给出相反指令的？（经典例子：'多举例子'和"
+                   "'别啰嗦'同时生效）。有的话用 `pref retire --id --reason` 废掉过时的那条，"
+                   "不要留着互相打架。"}
+
+    # ---- 值得看一眼、但不算"错" ----
+    attention = {}
+
+    # 叶子节点：探针只查"某个正在学的内容的直接前置"，没有下游的 atom 结构上
+    # 永远碰不到。这里只在**用户主动要求体检时**列出，且只列不出题——这跟
+    # 决策 4 否决的"主动复习提醒"是两回事，那条否决的是主动出题打断学习。
+    leaves = []
+    for r in con.execute("SELECT * FROM atoms WHERE status='active'"):
+        if con.execute("SELECT 1 FROM edges WHERE from_slug=? AND type='prereq'",
+                       (r["slug"],)).fetchone():
+            continue
+        v = atom_view(r)
+        if v["recall"] < DUE_THRESHOLD and r["level"] >= 2:
+            leaves.append({"slug": r["slug"], "name": r["name"], "recall": v["recall"],
+                           "level": v["level_name"]})
+    if leaves:
+        attention["stale_leaves"] = {
+            "items": sorted(leaves, key=lambda x: x["recall"])[:a.limit],
+            "note": "这些没有下游 atom，探针结构上够不到，可能已经忘了却无人察觉——"
+                    "而学习线末端往往正是最核心的结论。**只是列出，不要主动出题**，"
+                    "用户想复习会自己开口。"}
+
+    blocked = [dict(r) for r in con.execute(
+        "SELECT slug,name,fail_streak FROM atoms WHERE status='blocked'")]
+    if blocked:
+        attention["blocked_atoms"] = {"items": blocked,
+                                      "note": "连续失败被止损的，换个讲法/补前置后可以重开"}
+
+    n_cand = con.execute("SELECT COUNT(*) c FROM teaching_prefs "
+                         "WHERE active=0 AND retired=0").fetchone()["c"]
+    if n_cand >= 5:
+        attention["candidate_pileup"] = {
+            "count": n_cand,
+            "note": "候选规则堆积。要么证据门槛偏高，要么这些本就该 retire 掉"}
+
+    isolated = [r["slug"] for r in con.execute("SELECT slug FROM atoms")
+                if not con.execute("SELECT 1 FROM edges WHERE from_slug=? OR to_slug=?",
+                                   (r["slug"], r["slug"])).fetchone()]
+    if isolated:
+        attention["isolated_atoms"] = {
+            "items": isolated[:a.limit],
+            "note": "既没有前置也没有下游，可能是路线图断了或 slug 拼错"}
+
+    thin = [d for d, c in con.execute(
+        "SELECT domain,COUNT(*) FROM atoms WHERE domain IS NOT NULL "
+        "GROUP BY domain HAVING COUNT(*)=1")]
+    if thin:
+        attention["thin_domains"] = {
+            "items": thin, "note": "只有 1 个 atom 的领域，可能是 domain 名打错了"}
+
+    res["needs_judgment"] = judgment
+    res["attention"] = attention
+    res["hint"] = (
+        "三块可信度不同，别混着报给用户：structural 是**确定的问题**（照 fix 修）；"
+        "needs_judgment 是**待你判断的材料**，逐条读完再下结论，别假设现状就是对的；"
+        "attention 只是**值得看一眼**，多数时候无需处理。"
+        "读完给用户一份人话报告 + 修复清单，**等用户确认再动手改**。")
+    out(res)
 
 
 def cmd_goal(a, con):
@@ -1741,6 +1901,11 @@ def main():
 
     p = sub.add_parser("distill", help="检测哪些 concept_type/error_type 该提炼成认知画像了")
     p.set_defaults(fn=cmd_distill)
+
+    p = sub.add_parser("review", help="完整体检（用户主动要求'检查知识库'时用）："
+                                      "结构问题 + 需要语义判断的疑点 + 值得看一眼的状态")
+    p.add_argument("--limit", type=int, default=10, help="每组材料最多列几条，控制上下文开销")
+    p.set_defaults(fn=cmd_review)
 
     p = sub.add_parser("pref", help="教学策略进化（L1 自动 / L2 需两次证据）")
     p.add_argument("action", choices=["add", "list", "hit", "miss", "prune", "retire", "retag"])

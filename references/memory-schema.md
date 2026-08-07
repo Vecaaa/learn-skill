@@ -260,6 +260,7 @@ FSRS 启发的乘方曲线（比指数曲线更贴近真实遗忘：早期降得
 | `misconception add\|list\|resolve\|retag [--error-type]` | 误区记录 + 跨领域错误类型 |
 | `pref add\|list\|hit\|miss\|prune\|retire\|retag` | 教学策略进化；`retire` 作废前提不再成立的规则；hit/miss 常规走 `verify --used-pref` |
 | `distill` | 报出该提炼成认知画像的 concept_type/error_type，附全部原始记录 |
+| `review [--limit]` | 完整体检：结构问题 + 需语义判断的疑点（分类同质性/画像准确性/规则矛盾）+ 值得看一眼的状态。用户主动要求时跑 |
 | `due [--topic]` | 正在衰减的 atom，**仅用户主动要求复习时用** |
 | `session start\|close` | 会话记账 |
 | `profile --set k=v` | 学习者档案 |
@@ -268,7 +269,7 @@ FSRS 启发的乘方曲线（比指数曲线更贴近真实遗忘：早期降得
 | `goal add\|list\|get\|set\|roadmap` | 大目标增删查；`roadmap` 输出完整树状总览带各阶段进度 |
 | `phase add\|list\|get\|set\|start\|close` | 里程碑；`start`/`close` 会自动推进"近详远粗"的展开状态 |
 | `project add\|list\|get\|set\|done` | 阶段内的巩固项目；`done` 列出关联 atom 提醒逐个 verify |
-| `doctor [--repair-fts]` | 数据完整性体检：悬空边、孤儿项目、重复 seq、FTS 失同步 |
+| `doctor [--repair-fts]` | **结构**完整性体检（只查代码能确定判定的）：悬空边、孤儿项目、重复 seq、FTS 失同步 |
 
 任何命令加 `--help` 看完整参数。
 

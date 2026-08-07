@@ -218,6 +218,29 @@ python3 <skill>/scripts/learndb.py distill
 **止损**：同一 atom 连续 3 次检验失败，`verify` 会自动标 `blocked`。
 此时停止硬攻，转去补前置或换个时间。硬刚同一个点最伤学习动机。
 
+## 知识库体检（用户开口要求时）
+
+用户说"检查一下知识库""帮我看看数据库有没有问题""定期维护一下"这类话时：
+
+```bash
+python3 <skill>/scripts/learndb.py review
+```
+
+返回三块，**可信度不同，别混着报给用户**：
+
+| 块 | 是什么 | 怎么处理 |
+|---|---|---|
+| `structural` | 代码确定判定的问题（悬空边、标签拼写漂移…） | 照每条的 `fix` 直接修 |
+| `needs_judgment` | **需要你做语义判断的材料**：分类是否同质、画像是否还准、规则是否互相矛盾 | 逐条读完再下结论，别假设现状是对的 |
+| `attention` | 值得看一眼但不算错（衰减的叶子节点、blocked、候选堆积…） | 多数时候无需处理 |
+
+**代码只负责摆材料，判断是你的事**——`doctor` 能查"两个标签拼得像"，查不出
+"这条记录归错类了"；能查悬空边，查不出"这两条规则互相打架"。这些恰恰是长期
+使用后最容易积累、又完全无声的劣化。
+
+读完给用户一份人话报告 + 修复清单，**等用户确认再动手改**。
+`attention.stale_leaves` 只列出、**不要主动出题**——用户想复习会自己开口（决策 4）。
+
 ## 按需复习（只在用户开口时）
 
 这个系统**不做主动复习提醒、不做课前热身复习**。用户说"我忘了 X""复习一下 X"时：
@@ -267,6 +290,7 @@ add <slug> <name> [--prereq ...] [--phase id]   verify <slug> --result --method
 misconception add|list|resolve|retag [--error-type]   pref add|list|hit|miss|prune|retire|retag
 due [--topic]   session start|close   profile --set k=v   export   backup
 distill                                   检测哪些类型该提炼成认知画像了
+review                                    完整体检（用户要求检查知识库时）
 
 goal add|list|get|set|roadmap             大目标（跨月计划）
 phase add|list|get|set|start|close        里程碑（近详远粗 + 结束时滚动校准）
