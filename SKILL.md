@@ -109,8 +109,15 @@ process / comparison / quantifier…），命中上面的 `insights` 或
 
 ```bash
 python3 <skill>/scripts/learndb.py verify <slug> --result pass --method transfer \
-    --phrasing "用户自己复述的原话"
+    --phrasing "用户自己复述的原话" --used-pref <id...> --used-insight <type...>
 ```
+
+**`--used-pref` / `--used-insight` 要如实填**：讲解时用了 `probe` 给出的哪几条
+规则/画像，就在这里回报（id 在 `teaching_guidance` 里）。这是教学策略唯一的
+证伪通道——不填的话，一条错规则导致的失败会被 100% 记到 atom 的 `difficulty`
+上（"这个知识点真难"），规则本身毫发无损继续被用，**错误的教法会伪装成内容难，
+而且会自我强化**。连续失效 3 次且多于成功次数的 pref 会自动降回候选。
+没用到就别填——宁可漏记，也不要把失败栽给一条没被用上的规则。
 
 `--phrasing` 值得每次都填：后续教学复用用户自己的措辞和心智模型，理解成本明显下降。
 答错时同时记误区（用户的**原话**比你的概括有用得多），并打上 `--error-type`：
@@ -234,10 +241,10 @@ python3 <skill>/scripts/learndb.py due --topic "<主题>"      # 或列出正在
 - **类比必须带失效边界。**坏类比是后期理解障碍的主要来源。
 - **不要每次都先搜索。**稳定知识直接开讲，见 `references/research.md`。
 - **不要索取账号密码。**需要登录的站点，引导用户自己登录后复用会话。
-- **真的用上一条已生效的 pref 时，顺手 `pref hit --id N`。**这个命令本来就
-  存在（见 `references/evolution.md` 防膨胀一节），但很容易被在教学过程中
-  忘记调用——一旦没人调用，"哪些规则真在起作用"这个防膨胀机制就形同虚设，
-  90天后系统没法区分"真没用的规则"和"有用但没被记录的规则"。
+- **用了哪条 pref/insight，就在 `verify` 时用 `--used-pref`/`--used-insight` 回报。**
+  这是教学策略唯一的证伪通道：不回报的话，一条错规则导致的失败会被全部记到
+  atom 的 `difficulty` 上，**错误的教法会伪装成"这个知识点难"并自我强化**。
+  挂在 `verify` 上是因为它每个 atom 都必跑，比记得单独调 `pref hit` 可靠。
 
 ## 何时读哪个 reference
 
@@ -257,7 +264,7 @@ python3 <skill>/scripts/learndb.py due --topic "<主题>"      # 或列出正在
 ```
 status  context <topic>  find <q>  get <slug>  probe <slug>  plan <slug>
 add <slug> <name> [--prereq ...] [--phase id]   verify <slug> --result --method
-misconception add|list|resolve|retag [--error-type]   pref add|list|prune|retire|retag
+misconception add|list|resolve|retag [--error-type]   pref add|list|hit|miss|prune|retire|retag
 due [--topic]   session start|close   profile --set k=v   export   backup
 distill                                   检测哪些类型该提炼成认知画像了
 

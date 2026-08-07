@@ -58,6 +58,11 @@ DISTILL_MIN_PREFS = 3   # 同一 concept_type 下积累到几条生效 pref，�
 DISTILL_MIN_MISC = 2    # 同一 error_type 下积累到几条误区，就该提炼成画像
 INSIGHT_PREFIX = "insight:"  # profile 里认知画像条目的命名约定，distill 靠它检测
 MAX_INSIGHTS_IN_GUIDANCE = 8  # probe 每次都带画像，超过这个数就该合并而不是继续堆
+# 一条教学指导累计 miss 到这个数、且 miss 多于 hit，就判定它没起作用：
+# pref 自动降回候选，insight 由 distill 报出来要求复核。
+# 定 3 而不是 2：偶尔一次失败可能是内容本身难，不该急着怪教法。
+PREF_MISS_LIMIT = 3
+INSIGHT_REVIEW_DAYS = 60  # 画像超过这么久没复核过，distill 提醒重新审视
 
 
 def now():
@@ -143,7 +148,7 @@ def update_stability(s_old, difficulty, passed, ml, r_now):
 
 # schema 版本。加表/加列时 +1，并在 migrate() 里补上对应的升级动作。
 # migrate() 靠它走快速路径，避免每条命令都重跑一遍全量 DDL。
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def connect():
@@ -275,6 +280,24 @@ CREATE TABLE IF NOT EXISTS teaching_prefs (
     retired_at TEXT
 );
 
+-- 教学指导的有效性反馈。pref 和 insight 用同一张表，因为"这条指导管不管用"
+-- 的判定逻辑对两者完全相同——分开做会变成同一概念的两处实现。
+--
+-- 为什么需要它：在此之前所有证据都是单向的（evidence_count / hit_count 只增
+-- 不减，insight 连计数都没有），一条错误的教学策略没有任何下台通道。更糟的是
+-- 归因错位：照错规则教 → 用户连错 → 系统把失败 100% 记到 atom 的 difficulty
+-- 上（"这知识点真难"），规则本身 evidence_count 毫发无损，继续被反复使用。
+-- 错误的教法会伪装成"内容难"，而且会自我强化。
+CREATE TABLE IF NOT EXISTS guidance_feedback (
+    kind TEXT NOT NULL,          -- 'pref'（值为 teaching_prefs.id）/ 'insight'（值为 type）
+    ref TEXT NOT NULL,
+    hits INTEGER DEFAULT 0,      -- 用了它、且随后的检验通过
+    misses INTEGER DEFAULT 0,    -- 用了它、但随后的检验失败
+    last_hit TEXT,
+    last_miss TEXT,
+    PRIMARY KEY (kind, ref)
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY,
     started TEXT, ended TEXT,
@@ -335,6 +358,17 @@ def migrate(con):
     misc_cols = {r[1] for r in con.execute("PRAGMA table_info(misconceptions)")}
     if misc_cols and "error_type" not in misc_cols:
         con.execute("ALTER TABLE misconceptions ADD COLUMN error_type TEXT")
+    con.executescript(SCHEMA)  # 先建好 guidance_feedback 再往里搬历史数据
+    # hit_count/last_hit 从 teaching_prefs 搬到 guidance_feedback，之后只认新表。
+    # 留着旧列不删（SQLite 删列要重建表，代价大于收益），但代码不再读写它们。
+    if pref_cols and "hit_count" in pref_cols:
+        for r in con.execute("SELECT id,hit_count,last_hit FROM teaching_prefs "
+                             "WHERE hit_count>0").fetchall():
+            con.execute(
+                "INSERT INTO guidance_feedback(kind,ref,hits,last_hit) VALUES('pref',?,?,?) "
+                "ON CONFLICT(kind,ref) DO NOTHING",
+                (str(r["id"]), r["hit_count"], r["last_hit"]))
+        con.execute("UPDATE teaching_prefs SET hit_count=0")
     con.executescript(SCHEMA)  # 全部 IF NOT EXISTS，重复执行安全
     con.execute("INSERT INTO meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
@@ -417,6 +451,44 @@ def domain_expertise(con, domain):
             "transfer_proven": proven, "tier": tier, "guidance": guidance}
 
 
+def feedback_counts(con, kind, ref):
+    r = con.execute("SELECT hits,misses FROM guidance_feedback WHERE kind=? AND ref=?",
+                    (kind, str(ref))).fetchone()
+    return (r["hits"], r["misses"]) if r else (0, 0)
+
+
+def record_guidance_feedback(con, kind, refs, passed):
+    """记一次"用了这些指导，随后的检验通过/失败"。
+
+    挂在 `verify` 上而不是单独的命令：`verify` 是教学循环里每个 atom 都必跑的
+    一步，模型顺手多传个 `--used-pref` 比记得再调一次 `pref hit` 可靠得多
+    （同决策 18）。返回被自动降级的 pref 列表。
+    """
+    demoted = []
+    col = "hits" if passed else "misses"
+    tcol = "last_hit" if passed else "last_miss"
+    for ref in refs or []:
+        ref = str(ref)
+        con.execute(
+            f"INSERT INTO guidance_feedback(kind,ref,{col},{tcol}) VALUES(?,?,1,?) "
+            f"ON CONFLICT(kind,ref) DO UPDATE SET {col}={col}+1, {tcol}=excluded.{tcol}",
+            (kind, ref, now()))
+        if passed:
+            continue
+        hits, misses = feedback_counts(con, kind, ref)
+        # miss 够多、且明显多于 hit → 这条指导大概率没起作用。
+        # pref 直接降回候选（可被新证据重新转正）；insight 只标记，
+        # 因为它是 L1 画像、由 distill 走复核流程，不该被单条检验静默改写。
+        if misses >= PREF_MISS_LIMIT and misses > hits and kind == "pref":
+            row = con.execute("SELECT active,rule FROM teaching_prefs WHERE id=?",
+                              (ref,)).fetchone()
+            if row and row["active"]:
+                con.execute("UPDATE teaching_prefs SET active=0 WHERE id=?", (ref,))
+                demoted.append({"id": int(ref), "rule": row["rule"],
+                                "hits": hits, "misses": misses})
+    return demoted
+
+
 def teaching_guidance(con, domain=None):
     """开讲前该知道的东西，一次性摆出来。
 
@@ -442,19 +514,23 @@ def teaching_guidance(con, domain=None):
             g["insights_truncated"] = (
                 f"画像超过 {MAX_INSIGHTS_IN_GUIDANCE} 条，这里只带了最近更新的几条。"
                 "该合并同类画像了——每条都要占用每次 probe 的上下文预算")
+    # 带上 id：模型要用 `verify --used-pref <id>` 回报这条规则管不管用
     rules = con.execute(
-        "SELECT concept_type, rule FROM teaching_prefs "
+        "SELECT id, concept_type, rule FROM teaching_prefs "
         "WHERE active=1 AND retired=0 AND concept_type IS NOT NULL AND concept_type!='' "
         "ORDER BY evidence_count DESC LIMIT 12").fetchall()
     if rules:
         by_type = {}
         for r in rules:
-            by_type.setdefault(r["concept_type"], []).append(r["rule"])
+            by_type.setdefault(r["concept_type"], []).append(
+                {"id": r["id"], "rule": r["rule"]})
         g["rules_by_concept_type"] = by_type
     if g:
         g["hint"] = ("开讲前先判断这次要讲的东西属于哪种 concept_type，"
                      "命中 rules_by_concept_type / insights 就照它组织第一次讲解，"
-                     "别等用户说没懂再补救。引导量按 domain_expertise.guidance 定。")
+                     "别等用户说没懂再补救。引导量按 domain_expertise.guidance 定。"
+                     "**用了哪几条，检验时用 `verify --used-pref <id> --used-insight <type>` "
+                     "回报**——否则一条错规则会一直把失败栽给「这个知识点难」。")
     return g or None
 
 
@@ -468,6 +544,11 @@ def atom_view(r):
         "verify_method": _col(r, "verify_method"), "status": _col(r, "status"),
         "fail_streak": fs, "difficulty": _col(r, "difficulty", 5.0),
         "stale": p < PROBE_THRESHOLD,
+        # 从未被检验过 ≠ 不会。库里 level 0 只代表"没有数据"，用户完全可能
+        # 早就会了——系统对"虚低"没有任何自动发现机制（探针只查已知的衰减，
+        # 不会去测一个它以为你不懂的东西），所以只能把这个状态标出来，
+        # 提醒开讲前先花十秒确认，别把已经会的东西从头讲一遍。
+        "never_assessed": r["last_verified"] is None,
     }
 
 
@@ -619,6 +700,12 @@ def cmd_probe(a, con):
             ok.append(v)
     res = {"target": a.slug, "probe": need, "skip": ok,
            "hint": "对 probe 列表每项出 1 道题；过了立刻继续，不过就地补 2-3 分钟"}
+    unknown = [x["slug"] for x in need if x.get("never_assessed")]
+    if unknown or _col(target, "last_verified") is None:
+        res["never_assessed_hint"] = (
+            "标了 never_assessed 的（含目标本身）从没被检验过——那只代表没有数据，"
+            "不代表用户不会。开讲前先花十秒问一句，答得上来就直接 "
+            "`verify --method transfer` 跳过去，别从头讲一遍。")
     guidance = teaching_guidance(con, _col(target, "domain"))
     if guidance:
         res["teaching_guidance"] = guidance
@@ -765,6 +852,21 @@ def cmd_verify(a, con):
     res = {"slug": a.slug, "result": a.result, "method": a.method,
            "level": lvl, "level_name": LEVEL_NAME[lvl], "stability_days": stab,
            "difficulty": diff, "fail_streak": streak, "status": status}
+
+    # 这次讲解用了哪些教学指导 → 给它们记一次有效/无效。
+    # 没传就什么都不记：宁可漏记，也不要把失败错误地栽给一条没被用到的规则。
+    demoted = (record_guidance_feedback(con, "pref", a.used_pref, passed) +
+               record_guidance_feedback(con, "insight", a.used_insight, passed))
+    con.commit()
+    if demoted:
+        res["demoted_prefs"] = demoted
+        res["advice_rules"] = ("这些教学规则连续失效已被降回候选——别再按它们教了。"
+                               "如果你判断失败另有原因（内容确实难、前置没补），"
+                               "用 `pref add` 追加一次证据把它转回来")
+    if not (a.used_pref or a.used_insight):
+        res["hint_feedback"] = ("这次没记 --used-pref/--used-insight。如果刚才的讲解"
+                                "确实用到了 probe 给出的某条规则或画像，下次带上——"
+                                "否则错误的教法会一直伪装成「这个知识点难」")
     if status == "blocked":
         res["advice"] = "连续 3 次失败：停止硬攻，转去补前置或换个时间再来，别继续磨"
     if lvl < 4:
@@ -900,8 +1002,17 @@ def cmd_pref(a, con):
         con.commit()
         out({"ok": True, "id": a.id, "concept_type": a.concept_type})
     elif a.action == "hit":
-        con.execute("UPDATE teaching_prefs SET hit_count=hit_count+1, last_hit=? WHERE id=?",
-                    (now(), a.id)); con.commit(); out({"ok": True, "id": a.id})
+        # 手动记一次命中。常规路径是 `verify --used-pref`（挂在必跑的命令上，
+        # 更可靠）；这条留给"用了规则但当下没有对应检验"的场合。
+        record_guidance_feedback(con, "pref", [a.id], True); con.commit()
+        h, m = feedback_counts(con, "pref", a.id)
+        out({"ok": True, "id": a.id, "hits": h, "misses": m})
+    elif a.action == "miss":
+        demoted = record_guidance_feedback(con, "pref", [a.id], False); con.commit()
+        h, m = feedback_counts(con, "pref", a.id)
+        out({"ok": True, "id": a.id, "hits": h, "misses": m,
+             "demoted": bool(demoted),
+             "note": f"累计 {m} 次失效、{h} 次有效；miss≥{PREF_MISS_LIMIT} 且多于 hit 会自动降回候选"})
     elif a.action == "retire":
         # 规则被证伪、或前提条件（比如渲染环境）不再成立时用这个，而不是留着
         # 互相矛盾的规则等 90 天 prune——prune 只处理 active=1 的规则，且只是
@@ -928,8 +1039,9 @@ def cmd_pref(a, con):
         # 宁可少剪掉几条其实没用的规则，也不要错误剪掉一条其实还在起作用、
         # 只是没被显式记录命中的规则。
         rows = con.execute(
-            "SELECT id,scope,last_hit,created FROM teaching_prefs "
-            "WHERE active=1 AND layer='L2'").fetchall()
+            "SELECT p.id, p.scope, p.created, f.last_hit FROM teaching_prefs p "
+            "LEFT JOIN guidance_feedback f ON f.kind='pref' AND f.ref=CAST(p.id AS TEXT) "
+            "WHERE p.active=1 AND p.layer='L2'").fetchall()
         stale = []
         for r in rows:
             base_days = days_since(r["last_hit"] or r["created"]) or 0
@@ -958,11 +1070,16 @@ def cmd_pref(a, con):
         con.commit(); out({"demoted": stale, "count": len(stale),
                             "note": "既没被pref hit命中过，对应领域也超过90天没有新的atom活动，才会被降级"})
     else:
+        # hit/miss 只从 guidance_feedback 读——teaching_prefs.hit_count/last_hit
+        # 是旧列，已停止写入（migrate 把历史值搬过去了），留着只为不破坏老库。
         rows = con.execute(
-            "SELECT id,layer,scope,concept_type,rule,polarity,evidence_count,active,hit_count,"
-            "last_hit,retired,retired_reason FROM teaching_prefs WHERE (?=1 OR active=1) "
-            "AND (?='' OR concept_type=?) "
-            "ORDER BY active DESC, evidence_count DESC",
+            "SELECT p.id,p.layer,p.scope,p.concept_type,p.rule,p.polarity,p.evidence_count,"
+            "p.active,p.retired,p.retired_reason,"
+            "COALESCE(f.hits,0) hits, COALESCE(f.misses,0) misses, f.last_hit, f.last_miss "
+            "FROM teaching_prefs p "
+            "LEFT JOIN guidance_feedback f ON f.kind='pref' AND f.ref=CAST(p.id AS TEXT) "
+            "WHERE (?=1 OR p.active=1) AND (?='' OR p.concept_type=?) "
+            "ORDER BY p.active DESC, p.evidence_count DESC",
             (1 if a.all else 0, a.concept_type or "", a.concept_type or "")).fetchall()
         out([dict(r) for r in rows])
 
@@ -1027,9 +1144,26 @@ def cmd_distill(a, con):
             continue  # 还没积累够，不用管
         # 已有画像但之后又攒了新记录 → 画像过时了，值得重写
         stale = bool(existing and newest and (existing["updated"] or "") < newest)
-        if existing and not stale:
+        # 画像也要能被证伪：`verify --used-insight` 累计的 miss 说明照它教反而更糟。
+        # 不像 pref 那样自动降级——画像是 L1，该由人/模型复核后重写，不该被
+        # 单条检验静默改掉。另外太久没复核的也报出来（记录会漂，画像不会自己更新）。
+        hits, misses = feedback_counts(con, "insight", t)
+        ineffective = misses >= PREF_MISS_LIMIT and misses > hits
+        overdue = bool(existing and (days_since(existing["updated"]) or 0) > INSIGHT_REVIEW_DAYS)
+        if existing and not stale and not ineffective and not overdue:
             ok.append({"kind": kind, "type": t, "records": n,
-                       "insight": existing["value"]})
+                       "insight": existing["value"], "hits": hits, "misses": misses})
+            continue
+        if existing and (ineffective or overdue) and not stale:
+            pending.append({
+                "kind": kind, "type": t, "records": n, "threshold": need,
+                "reason": (f"照这条画像教失败了 {misses} 次、只成功 {hits} 次，多半是画像本身有问题"
+                           if ineffective else
+                           f"超过 {INSIGHT_REVIEW_DAYS} 天没复核过，底下的记录可能已经漂了"),
+                "current_insight": existing["value"],
+                "hits": hits, "misses": misses,
+                "write_to": key, "source_records": records,
+            })
             continue
         pending.append({
             "kind": kind, "type": t, "records": n, "threshold": need,
@@ -1574,6 +1708,13 @@ def main():
     p.add_argument("--result", choices=["pass", "fail"], required=True)
     p.add_argument("--method", choices=list(METHOD_LEVEL), required=True)
     p.add_argument("--phrasing", help="用户复述时的原话，后续教学复用")
+    p.add_argument("--used-pref", dest="used_pref", nargs="*", default=[],
+                   help="这次讲解用到的 pref id（probe 的 teaching_guidance 里有）。"
+                        "通过→记一次有效，失败→记一次失效；连续失效会自动降回候选。"
+                        "不传就不记——错误的教法会一直伪装成「这个知识点难」")
+    p.add_argument("--used-insight", dest="used_insight", nargs="*", default=[],
+                   help="这次讲解用到的 insight 类型（如 notation）。同上，但画像不会被"
+                        "单条检验静默改写，只由 distill 报出来要求复核")
     p.set_defaults(fn=cmd_verify)
 
     p = sub.add_parser("set", help="直接改 atom 字段")
@@ -1602,7 +1743,7 @@ def main():
     p.set_defaults(fn=cmd_distill)
 
     p = sub.add_parser("pref", help="教学策略进化（L1 自动 / L2 需两次证据）")
-    p.add_argument("action", choices=["add", "list", "hit", "prune", "retire", "retag"])
+    p.add_argument("action", choices=["add", "list", "hit", "miss", "prune", "retire", "retag"])
     p.add_argument("--rule"); p.add_argument("--scope", default="global")
     p.add_argument("--layer", default="L2", choices=["L1", "L2"])
     p.add_argument("--polarity", default="works", choices=["works", "fails"])

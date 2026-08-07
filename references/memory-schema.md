@@ -116,6 +116,21 @@
 撞到同文本会拒绝复活（提示先看作废理由），逼你想清楚是否真的要用新规则
 覆盖，而不是绕开当初作废的原因。
 
+### `guidance_feedback` — 教学指导管不管用
+
+`pref` 和 `insight` 共用一张表，因为"这条指导有没有效"的判定逻辑对两者相同，
+分开做就是同一概念的两处实现。`kind` 区分来源（`pref` 存 id / `insight` 存 type），
+`hits`/`misses` 由 `verify --used-pref` / `--used-insight` 累加。
+
+**它补的是一个架构性缺口**：在此之前所有证据都是单向的（`evidence_count`、
+`hit_count` 只增不减，`insight` 连计数都没有），一条错误的教学策略没有任何
+下台通道。更糟的是归因错位——照错规则教 → 用户连错 → 系统把失败 100% 记到
+atom 的 `difficulty` 上，规则毫发无损继续被用，**错误教法伪装成"内容难"且自我强化**。
+
+pref 累计 miss ≥ `PREF_MISS_LIMIT` 且多于 hit 会**自动降回候选**；insight 不自动
+改写（它是 L1 画像），由 `distill` 报出来要求人工复核。`teaching_prefs.hit_count`
+是旧列，历史值已由 `migrate()` 搬进本表，代码不再读写它。
+
 ### `sessions` — 会话记账
 
 每次结束写 ≤5 行摘要 + 观察到的信号。不要写长篇，长篇没人看也没法聚合。
@@ -177,8 +192,11 @@
 ### 回忆概率
 
 ```
-R = exp(-t / S)      t = 距上次验证的天数，S = stability
+R = (1 + t/(9S))^-1      t = 距上次验证的天数，S = stability
 ```
+
+FSRS 启发的乘方曲线（比指数曲线更贴近真实遗忘：早期降得更快、长尾更平缓）。
+**S 的语义**是"回忆概率降到 90% 所需的天数"——代入 t=S 得 R=0.9。
 
 这不是精确的记忆科学，只是一个够用的排序信号。它的作用是决定
 **"要不要在开讲前探一下"**，不是替代真实检验。
@@ -193,15 +211,22 @@ R = exp(-t / S)      t = 距上次验证的天数，S = stability
   recall 却是满值 → `probe` 认为它很牢固**直接跳过**。用户刚答错的东西，
   同一会话里再教依赖它的内容时探针视而不见——正好漏掉最该探的情况
 
-- `R < 0.7` → `probe` 认为值得探针
-- `R < 0.6` → `due` 认为已经开始忘（仅用户主动要求复习时才查）
+- `R < 0.9` → `probe` 认为值得探针（乘方曲线下恰好是 t > S，即过了 stability 天）
+- `R < 0.8` → `due` 认为已经开始忘（t > 2.25S，仅用户主动要求复习时才查）
+
+⚠️ **这两个阈值必须和上面的曲线一起调**——换曲线不重算阈值会让探针静默失准
+（实测漂了 10.8 倍，见 CLAUDE.md 第二次架构复审）。
 
 ### 验证后的更新
 
 | 结果 | level | stability |
 |---|---|---|
-| 通过 | 提到该检验方式对应的上限 | `S × (1.4 + 0.25 × level)`，上限 365 天 |
-| 失败 | 压到该方式之下 | `S × 0.4`，下限 0.5 天 |
+| 通过 | 提到该检验方式对应的上限 | `update_stability()`：涨幅随 difficulty 降低、随"通过得多意外"（检验时估算的 recall 越低）升高 |
+| 失败 | 压到该方式之下 | 同一函数：difficulty 越高、失败前 recall 越低，惩罚越轻 |
+
+`atoms.difficulty`（1~10）是独立于 stability 的第二个状态量，由
+`update_difficulty()` 维护。首次验证时代入 `FIRST_VERIFY_RECALL` 而非 0.0——
+0.0 表示"没有数据"，不是"预期已忘光"，混用会让首次通过的 stability 高估近一倍。
 
 连续 3 次失败 → `status = blocked`，并返回止损建议。
 下次通过会自动解除 blocked。
@@ -229,11 +254,12 @@ R = exp(-t / S)      t = 距上次验证的天数，S = stability
 | `probe <slug>` | 教之前列出值得探针的**直接前置** |
 | `plan <slug> [--gaps-only]` | 全部前置闭包，拓扑序（最深祖先在前） |
 | `add <slug> <name> [--prereq ...]` | 新增/更新 atom |
-| `verify <slug> --result --method [--phrasing]` | 记检验结果，自动更新 level/stability |
+| `verify <slug> --result --method [--phrasing] [--used-pref] [--used-insight]` | 记检验结果，更新 level/stability/difficulty；回报本次用到的教学指导 |
 | `set <slug> k=v ...` | 直接改字段 |
 | `edge add\|rm <from> <to> [--type]` | 维护依赖图 |
-| `misconception add\|list\|resolve` | 误区记录 |
-| `pref add\|list\|hit\|prune\|retire` | 教学策略进化；`retire --id --reason` 作废前提不再成立的规则 |
+| `misconception add\|list\|resolve\|retag [--error-type]` | 误区记录 + 跨领域错误类型 |
+| `pref add\|list\|hit\|miss\|prune\|retire\|retag` | 教学策略进化；`retire` 作废前提不再成立的规则；hit/miss 常规走 `verify --used-pref` |
+| `distill` | 报出该提炼成认知画像的 concept_type/error_type，附全部原始记录 |
 | `due [--topic]` | 正在衰减的 atom，**仅用户主动要求复习时用** |
 | `session start\|close` | 会话记账 |
 | `profile --set k=v` | 学习者档案 |
