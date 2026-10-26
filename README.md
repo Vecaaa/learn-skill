@@ -148,13 +148,20 @@ python3 ~/.claude/skills/learn/scripts/learndb.py export
 
 ```
 ~/.claude/learning/
-├── learn.db          # SQLite，唯一真源
+├── learn.db          # SQLite（WAL 模式），唯一真源
+├── learn.db-wal      # WAL 日志，SQLite 自动管理（git 忽略）
+├── learn.db-shm      # WAL 共享内存索引（git 忽略）
 ├── knowledge.md      # 可读快照（export 生成，适合 git 备份）
 ├── sources.jsonl     # 站点注册表，不含任何凭据
 └── backups/          # 自动快照，保留最近 20 份
 ```
 
-**全部在本机。**没有任何东西上传。想备份就把 `~/.claude/learning/` 放进 git。
+**全部在本机。**没有任何东西上传。想备份就把 `~/.claude/learning/` 放进 git（忽略 `learn.db-wal` / `learn.db-shm`）。
+
+**恢复备份时要小心**：库用 WAL 模式，直接把备份拷到 `learn.db` 上（或 `git checkout learn.db`）
+而 `learn.db-wal` 还在，旧日志会被重放，恢复会静默失效甚至损坏文件。正确做法：先停掉所有在用
+这个库的程序（learn-tutor、所有 Claude Code 会话），执行 `rm -f learn.db-wal learn.db-shm`，
+再拷贝备份 / checkout；或者用 `sqlite3 learn.db ".restore backups/learn-….db"`。
 
 关于登录：这个 skill **不会索取你的账号密码**。遇到需要登录的资料，
 它会请你自己登录一次（登录态之后会保留），或者请你把内容粘贴过来。

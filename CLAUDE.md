@@ -82,6 +82,8 @@
 | **换了存储模式，直接操作文件的代码有没有跟上** | 开 WAL 后 `backup` 仍用 `shutil.copy2` 复制主文件，未 checkpoint 的数据不在备份里 |
 | **"不传 id 就取最新一条"这类隐式选择** | `session close` 更新 `MAX(id)`，每次 checkpoint 覆盖上一次会话 |
 | **同一份输入，两个入口的预处理一致吗** | `configure()` 会 `abspath`+`expanduser`，环境变量 `LEARN_DB` 不会 → `LEARN_DB=foo.db` 时 `makedirs("")` 崩溃 |
+| **换成 WAL 后，任何替换主文件的操作** | 恢复备份、`git checkout learn.db` 前不处理 `-wal`/`-shm`，旧 WAL 会被重放到新文件上，恢复静默无效或损坏（流程见决策 24） |
+| **两个进程能不能同时通过"版本检查"** | `migrate()` 先读 `schema_version` 再升级，两个进程可能都读到旧版本并各跑一遍迁移；下次 `SCHEMA_VERSION` 升版时，迁移要放进 `BEGIN IMMEDIATE`，拿到写锁后**重新检查**版本再动手（目前的迁移是幂等的 ADD COLUMN/CREATE IF NOT EXISTS，暂无实际危害） |
 | **失败路径有没有留下半成品 / 泄漏的状态** | `backup` 中途失败留下残缺文件占保留额度；`run()` 里 `connect()` 抛错时 ContextVar 收集器没还原，之后的 `out()` 全被吞；`session close --id` 指向不存在的行却返回 ok |
 
 **2. 检查渐进披露有没有退化。**
@@ -568,10 +570,36 @@ stability 涨得更慢 → 探针更频繁 → 看起来"确实很难"）。
 resume skill 的 `learn_bridge.py` 用 `mode=ro` 只读打开，WAL 下照常可读（`tests/test_concurrency.py`
 有用例）。
 
-**顺带修的 bug**：`session close` 不传 `--id` 时更新 `MAX(id)`，每次 checkpoint 都覆盖上一次。
-现在无 `--id` 时：恰有一个未结束会话就关它，没有就新建一行再关，多个则报错。
-**局限**：一个遗留的、从没 close 的 `session start` 会被后来的无 `--id` close 当成目标——
-调用方有 session id 时应显式传 `--id`（learn-tutor 的 checkpoint 就是这样做的）。
+**恢复备份 / 替换主文件的安全流程（WAL 下必须遵守）**：开 WAL 后，如果 `learn.db-wal` 非空，
+直接把备份拷到 `learn.db` 上（或 `git checkout learn.db`）——SQLite 下次打开时会把**旧的 WAL
+重放到新文件上**："恢复"静默无效，主文件来自不相关版本时还会损坏文件。正确做法：
+1. 停掉所有 learndb 使用者（learn-tutor、所有 Claude Code 会话）；
+2. `rm -f learn.db-wal learn.db-shm`；
+3. 再拷备份 / checkout 文件。
+替代做法：`sqlite3 learn.db ".restore backups/learn-….db"`（走 SQLite 自己的流程，会处理 WAL）。
+这条同样写进了 `references/memory-schema.md` 文件布局和 `README.md`。
+
+**resume 桥接遗留的小文件**：resume skill 的只读连接（`mode=ro`）关闭后，可能留下一个空的 `-wal`
+和一个 `-shm`。无害，下一次有写连接打开并关闭时会被清掉——这也是 `.gitignore` 必须忽略
+`-wal`/`-shm` 的另一个理由。
+
+**`run()` 异常约定**：除 `LearnDBError` 外，`sqlite3.Error`（如等满 5 秒后的 "database is locked"）
+和 `OSError` 原样传播；`configure()` 是进程级的，一个进程只能指向一个库。
+
+**`export` 的 checkpoint 结果**：`wal_checkpoint(TRUNCATE)` 返回 `(busy, log, checkpointed)`，
+`busy` 非 0 时 export 输出多一个 `"wal_checkpoint": "incomplete"`（正常输出不变）——此刻 git 提交
+learn.db 会缺 WAL 里的数据，调用方应稍后重试。`backup` 先写 `.tmp` 再 `os.replace`，失败只清
+`.tmp`（不会误删同一秒内的好备份），20 份保留额度不计 `.tmp`。
+
+**`session close` 的目标选择（顺带修的 bug：旧实现更新 `MAX(id)`，每次 checkpoint 覆盖上一次）**：
+- `--new`：总是新建一整行（started=now，goal 取 `--goal`），忽略未结束的会话；与 `--id` 同用是业务错误。
+  **程序化调用方（learn-tutor）推荐用它**——不受遗留孤儿 `session start` 和 start/close 竞态影响；
+- `--id N`：关那一行；不存在 → `{"error":"not found"}`；已结束 → `{"error":"会话 N 已经结束"}`，不改任何东西；
+- 无 `--id`：没有未结束的 → 新建一行再关；恰有一个 → 关它；**多个 → 新建一行再关，并返回
+  `warning`（列出旧会话 id）**。checkpoint 路径永远不失败（早先的"多个则报错"会让轻量
+  checkpoint 丢数据，复审时否决）。
+**局限**：恰有一个未结束会话时，无 `--id` 的 close 会把它当目标——它可能是别处遗留的孤儿，
+也可能与另一端的 `session start` 竞态；要确定性就传 `--id` 或 `--new`。
 
 ---
 
@@ -862,4 +890,4 @@ unset LEARN_DB && rm -f /tmp/reg.db
 | 2026-08-05 | **第二次架构复审**（触发条件：本次会话累计改动 759 行，是 ~100 行阈值的 7 倍）。按流程"先假设有 bug、逐条用命令验证"列了 7 条疑点，**4 条是真 bug、2 条是隐患**，全部已修，并据此给复审疑点清单新增了 4 个类型（见上）。① **`PROBE_THRESHOLD` 语义漂移**（最严重）：`recall_prob` 从指数换成乘方曲线时，没有重算依赖它的 `PROBE_THRESHOLD=0.7`/`DUE_THRESHOLD=0.6`——这两个值是按指数曲线校准的，换曲线后探针触发时刻推迟了 **10.8 倍**（S=2.15 的 atom 从"0.8 天后探"变成"8.2 天后探"），正好命中改动指引里"它以为我会但我早忘了"那条抱怨。修法不是随便调大，而是**让阈值和新曲线的语义对齐**：乘方曲线下 R=0.9 恰好解出 t=S，所以 `PROBE_THRESHOLD=0.9` 让探针正好在 `stability_days` 天后触发，这个字段名从此名副其实；`DUE_THRESHOLD=0.8`（t=2.25S）保持"复习列表比探针晚"的相对关系。② **哨兵值语义混淆**：首次 verify 时 `last_verified` 为空，`recall_prob` 返回 0.0 表示"没有数据"，但 `update_stability` 把低 recall 读作"通过得很意外→记得比预期牢→大幅加 stability"，两种含义混在一起让首次通过的 stability 高估近一倍（2.13 vs 合理的 1.28）。修法：新增 `FIRST_VERIFY_RECALL=0.9`，首次验证时代入它而非 0.0。③ **标签漂移无检测**：`error_type`/`concept_type`/`domain` 写成大小写或单复数不同的变体时，同类记录被拆散、`distill` 永远达不到阈值，而 `doctor` 一声不吭——这是最危险的那种失败（标签看着都在，抽象层已失效）。`doctor` 新增 `tag_drift` 检查（归一化后相同但字面不同即报，带 retag 修复命令）。④ **`export` 漏了新字段**（与第一次复审漏掉路线图同类）：`difficulty`/`error_type`/`concept_type`/引导档位都不在人类可读快照里。⑤ 隐患：`probe` 的 `insights` 无条数上限，而 `probe` 是每个 atom 都跑的命令 → 加 `MAX_INSIGHTS_IN_GUIDANCE=8` 并在超限时提示合并。⑥ 隐患：`distill` 把已 resolve 的误区计入阈值却不标注 → 保留计入（历史证据对提炼画像仍有价值）但在 `source_records` 里加 `resolved` 标记。渐进披露检查：SKILL.md 272 行，未超 500 上限。全套冒烟 + 8 项已修 bug 回归 + 边界用例通过，`doctor` 干净。**另外抓到 6 处文档与代码不一致**（同属静默失效——下一个冷启动的会话会照着过时的数字理解系统）：决策 3 里写死的 `recall < 0.7`、文件职责表里 SKILL.md「已用约 170」（实际 272）、可调参数表里 `PROBE_THRESHOLD`/`DUE_THRESHOLD` 的旧值、以及两条早已被 `update_stability()`/`update_difficulty()` 取代的 stability 增长率/衰减率条目，全部同步；并补上 `FIRST_VERIFY_RECALL`、`MAX_INSIGHTS_IN_GUIDANCE` 这两个新常数。**教训：改常数时顺手 grep 一遍它在文档里的所有出现**——可调参数表尤其容易漏，它是下次想调参的人唯一会看的地方，写着旧值等于主动误导。 |
 | 2026-08-05 | **引导量按 domain 熟练度 + 诊断材料挂到 `probe`**（决策 21，无 schema 变更）。这一项把上一轮列出的方向 A 和 ① 合并实现，因为两者是同一件事的两面（"教之前该知道什么"），且共享同一个可靠挂载点。A：新增 `domain_expertise()`，按该 domain 下 level≥3 的 atom 绝对数分三档（<3 novice / 3–6 developing / ≥7 proficient）决定引导总量——原来只按单个 atom 的 `level` 判断，而新 atom 永远是 level 0，导致每个新知识点都从最完整的四步模板讲起，对已有基础的学习者反而降低理解（专家反转效应）。①：新增 `teaching_guidance()`，把引导档位 + 已提炼的 `insights` + 按 `concept_type` 分组的生效规则一次性挂进 `probe` 的返回——`probe` 是教学循环里每个 atom 都必跑的第一步，是最稳定的挂载点，比"记得先查规律再讲"这种文字指令可靠得多（同决策 18）。`context` 也返回 `domain_expertise`（可跨多个 domain）。`pedagogy.md` 新增"引导总量按领域熟练度定"一节，`SKILL.md` 的探针/讲解两步改写。**顺带修掉两个静默失败**：`probe`/`plan` 传一个不存在的 slug 时原本静默返回空列表（看起来像"没有前置要探/要补"，实际可能只是拼错），现在给干净报错——`probe` 的那处还因为这次新增的 `_col(target, "domain")` 变成了崩溃（`None` 抛 `TypeError`，`_col` 原本只捕 `IndexError`/`KeyError`），一并修了。全套回归 + 边界用例（无 domain 的 atom、空 context、不存在的 slug）通过。 |
 | 2026-08-05 | **抽象层统一设计：`error_type` + `distill`**（决策 20，`SCHEMA_VERSION` 5→6）。用户要求重点优化"教学"而非"复习"方向，第二轮外部研究（专家反转效应、ITS 的 buggy model/error taxonomy、自我解释元分析）后确定做这一项。核心认识：`teaching_prefs` 和 `misconceptions` 存的都是具体记录，跨领域时归零——这是记忆机制最根本的天花板。修法是同一个模式在三处落地（不是三个独立特性）：`misconceptions` 加 `error_type`（对称于上一轮加的 `concept_type`），新增 `misconception retag` 和 `--error-type` 跨域查询；新增 `distill` 命令，把"该提炼成认知画像了"变成能被算出来的状态（记录数够阈值 + `profile` 无对应 `insight:` 条目或条目已过时），输出附带全部原始记录供模型提炼，已挂进完整版 checkpoint（同决策 18 的原则）。**踩到的坑值得记**：第一次给库里 5 条误区打 `error_type` 打出 5 个互不相同的类型，`distill` 一条都触发不了——抽象标签如果每条记录一个就等于没建，判断标准是"补救策略是不是同一套"而非"看起来像不像"；重新归类合并出 `aggregate-vs-instance` 和 `existential-claim` 两类（各 2 条），提炼出库里最初的两条 `insight:`。`pedagogy.md`/`evolution.md`/`memory-schema.md`/`SKILL.md` 同步更新，全套回归 + v4 老库迁移测试通过。 |
-| 2026-10-26 | **为 learn-tutor 共用数据库做准备**（决策 24，无 schema 变更）。新增库调用入口 `run(argv)`（与 CLI 共用解析器和 cmd_*，ContextVar 收集输出）、`configure()`、`LearnDBError`；连接开 WAL；`backup` 改用 SQLite backup API；`export` 末尾 wal_checkpoint；修复 `session close` 更新 `MAX(id)` 导致每次 checkpoint 覆盖上一次会话的 bug（真实库一条记录从 08-04 覆盖到 10-15）。新增 `tests/`（unittest）：黄金基线逐字比对 44 条命令的 CLI 输出与最终库状态、库调用、两进程并发写、mode=ro 读 WAL、备份完整性、会话记账。**复审（按本文流程，逐条用命令验证）又查出 5 个小问题，均已修并各配一条先红后绿的测试**：① `run([...,"--help"])` 在抛 `LearnDBError` 前先往 stdout 打印用法；② `run()` 里 `connect()` 抛错时 ContextVar 收集器未还原；③ `session close --id <不存在>` 返回 ok 而没有任何行被更新；④ `backup` 中途失败留下半成品文件；⑤ `LEARN_DB=foo.db`（无目录部分）时 `makedirs("")` 崩溃（老问题，早于本次改动）。另补测试：export 的 checkpoint、start→close→无 id close、多线程并发写。确认无问题的：`DB_PATH` 全部在函数运行时读取（`configure()` 后 init/status/export/backup 路径同步变化）；44 条黄金命令与 AST 检查均未发现一次调用 `out()` 两次；SKILL.md 303 行未变且其轻量 checkpoint 只调 `session close`，与新语义一致。顺带把文件职责表里陈旧的 SKILL.md 行数（272）更正为 303。 |
+| 2026-10-26 | **为 learn-tutor 共用数据库做准备**（决策 24，无 schema 变更）。新增库调用入口 `run(argv)`（与 CLI 共用解析器和 cmd_*，ContextVar 收集输出）、`configure()`、`LearnDBError`；连接开 WAL；`backup` 改用 SQLite backup API；`export` 末尾 wal_checkpoint；修复 `session close` 更新 `MAX(id)` 导致每次 checkpoint 覆盖上一次会话的 bug（真实库一条记录从 08-04 覆盖到 10-15）。新增 `tests/`（unittest）：黄金基线逐字比对 44 条命令的 CLI 输出与最终库状态、库调用、两进程并发写、mode=ro 读 WAL、备份完整性、会话记账。**复审（按本文流程，逐条用命令验证）又查出 5 个小问题，均已修并各配一条先红后绿的测试**：① `run([...,"--help"])` 在抛 `LearnDBError` 前先往 stdout 打印用法；② `run()` 里 `connect()` 抛错时 ContextVar 收集器未还原；③ `session close --id <不存在>` 返回 ok 而没有任何行被更新；④ `backup` 中途失败留下半成品文件；⑤ `LEARN_DB=foo.db`（无目录部分）时 `makedirs("")` 崩溃（老问题，早于本次改动）。另补测试：export 的 checkpoint、start→close→无 id close、多线程并发写。确认无问题的：`DB_PATH` 全部在函数运行时读取（`configure()` 后 init/status/export/backup 路径同步变化）；44 条黄金命令与 AST 检查均未发现一次调用 `out()` 两次；SKILL.md 303 行未变且其轻量 checkpoint 只调 `session close`，与新语义一致。顺带把文件职责表里陈旧的 SKILL.md 行数（272）更正为 303。**终审又修**：裸 `session close` 在多个未结束会话时改为新建一行并带 warning、新增 `session close --new`（总是新建整行，learn-tutor 用）、`--id` 指向已结束会话时拒绝覆盖；export 在 checkpoint 被读事务挡住时输出 `wal_checkpoint: incomplete`；backup 改写 `.tmp` 再改名（失败不再误删同名好备份）；补 `run()` 异常约定、WAL 下恢复备份的安全流程、migrate() 竞态提示（均为文档）及退出码 1 的 CLI 测试。 |

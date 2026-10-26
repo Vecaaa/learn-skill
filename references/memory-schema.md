@@ -47,6 +47,17 @@
 └── backups/          # backup 生成（SQLite backup API，单文件），保留最近 20 份
 ```
 
+**恢复备份 / 替换 `learn.db`（含 `git checkout learn.db`）必须先处理 `-wal`/`-shm`**：
+如果 `learn.db-wal` 非空，SQLite 下次打开时会把旧 WAL 重放到新文件上——"恢复"静默无效，
+主文件来自不相关版本时还会损坏。安全流程：
+
+1. 停掉所有 learndb 使用者（learn-tutor、所有 Claude Code 会话）；
+2. `rm -f learn.db-wal learn.db-shm`；
+3. 拷贝备份 / checkout 文件。
+
+替代：`sqlite3 learn.db ".restore backups/learn-….db"`。只读连接（如 resume 的桥接）关闭后
+可能留下空 `-wal` 和 `-shm`，无害，下一次写入后会被清掉。
+
 可用环境变量 `LEARN_DB` 覆盖数据库路径（多套知识库、或测试时有用）。
 
 ---
@@ -137,9 +148,15 @@ pref 累计 miss ≥ `PREF_MISS_LIMIT` 且多于 hit 会**自动降回候选**�
 
 每次结束写 ≤5 行摘要 + 观察到的信号。不要写长篇，长篇没人看也没法聚合。
 
-`session close` 不传 `--id` 时：恰有一个未结束的会话就关闭它；没有就新建一条并立即关闭
-（轻量 checkpoint 只调 close，所以每次 checkpoint 都是独立的一行）；有多个就报错要求 `--id`。
-早期实现在这里更新 `MAX(id)`，每次 checkpoint 都覆盖上一次的记录。
+`session close` 选哪一行：
+- 不传 `--id`、没有未结束的会话 → 新建一行并立即关闭（轻量 checkpoint 只调 close，每次 checkpoint 都是独立的一行）；
+- 不传 `--id`、恰有一个未结束 → 关闭它；
+- 不传 `--id`、有多个未结束 → 新建一行并关闭，返回 `warning`（列出旧会话 id）；不会失败，旧会话用 `--id` 关；
+- `--id N` → 关那一行；id 不存在 → 报错；该行已经结束 → 报错 `会话 N 已经结束`，不改任何东西；
+- `--new` → 总是新建一整行（started=now，goal 取 `--goal`），忽略未结束的会话，与 `--id` 同用报错。
+  **程序化调用方（如 learn-tutor）推荐用 `--new`。**
+
+早期实现在无 `--id` 时更新 `MAX(id)`，每次 checkpoint 都覆盖上一次的记录。
 
 ---
 
