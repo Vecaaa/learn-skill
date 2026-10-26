@@ -1,0 +1,1244 @@
+{
+ "steps": [
+  {
+   "args": [
+    "init"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "db": "<TMP>/learn.db",
+    "schema_version": 7
+   }
+  },
+  {
+   "args": [
+    "add",
+    "scope",
+    "作用域",
+    "--domain",
+    "JS",
+    "--alias",
+    "scope"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "slug": "scope",
+    "prereqs": []
+   }
+  },
+  {
+   "args": [
+    "add",
+    "closure",
+    "闭包",
+    "--domain",
+    "JS",
+    "--prereq",
+    "scope"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "slug": "closure",
+    "prereqs": [
+     "scope"
+    ]
+   }
+  },
+  {
+   "args": [
+    "verify",
+    "scope",
+    "--result",
+    "pass",
+    "--method",
+    "predict"
+   ],
+   "exit": 0,
+   "out": {
+    "slug": "scope",
+    "result": "pass",
+    "method": "predict",
+    "level": 3,
+    "level_name": "能应用",
+    "stability_days": 1.28,
+    "difficulty": 4.25,
+    "fail_streak": 0,
+    "status": "active",
+    "hint_feedback": "这次没记 --used-pref/--used-insight。如果刚才的讲解确实用到了 probe 给出的某条规则或画像，下次带上——否则错误的教法会一直伪装成「这个知识点难」",
+    "note": "只有 transfer（迁移到新情境）通过才算真掌握"
+   }
+  },
+  {
+   "args": [
+    "probe",
+    "closure"
+   ],
+   "exit": 0,
+   "out": {
+    "target": "closure",
+    "probe": [],
+    "skip": [
+     {
+      "slug": "scope",
+      "name": "作用域",
+      "domain": "JS",
+      "level": 3,
+      "level_name": "能应用",
+      "recall": 1.0,
+      "last_verified": "<TS>",
+      "verify_method": "predict",
+      "status": "active",
+      "fail_streak": 0,
+      "difficulty": 4.25,
+      "stale": false,
+      "never_assessed": false
+     }
+    ],
+    "hint": "对 probe 列表每项出 1 道题；过了立刻继续，不过就地补 2-3 分钟",
+    "never_assessed_hint": "标了 never_assessed 的（含目标本身）从没被检验过——那只代表没有数据，不代表用户不会。开讲前先花十秒问一句，答得上来就直接 `verify --method transfer` 跳过去，别从头讲一遍。",
+    "teaching_guidance": {
+     "domain_expertise": {
+      "domain": "JS",
+      "atoms": 2,
+      "applicable": 1,
+      "transfer_proven": 0,
+      "tier": "novice",
+      "guidance": "完整引导：最小可跑实例 → 为什么这样 → 一般化规则 → 边界/反例，四步都给"
+     },
+     "hint": "开讲前先判断这次要讲的东西属于哪种 concept_type，命中 rules_by_concept_type / insights 就照它组织第一次讲解，别等用户说没懂再补救。引导量按 domain_expertise.guidance 定。**用了哪几条，检验时用 `verify --used-pref <id> --used-insight <type>` 回报**——否则一条错规则会一直把失败栽给「这个知识点难」。"
+    }
+   }
+  },
+  {
+   "args": [
+    "find",
+    "作用域"
+   ],
+   "exit": 0,
+   "out": {
+    "query": "作用域",
+    "count": 1,
+    "hits": [
+     {
+      "slug": "scope",
+      "name": "作用域",
+      "domain": "JS",
+      "level": 3,
+      "level_name": "能应用",
+      "recall": 1.0,
+      "last_verified": "<TS>",
+      "verify_method": "predict",
+      "status": "active",
+      "fail_streak": 0,
+      "difficulty": 4.25,
+      "stale": false,
+      "never_assessed": false
+     }
+    ]
+   }
+  },
+  {
+   "args": [
+    "plan",
+    "closure"
+   ],
+   "exit": 0,
+   "out": {
+    "target": {
+     "slug": "closure",
+     "name": "闭包",
+     "domain": "JS",
+     "level": 0,
+     "level_name": "未学",
+     "recall": 0.0,
+     "last_verified": null,
+     "verify_method": null,
+     "status": "active",
+     "fail_streak": 0,
+     "difficulty": 5.0,
+     "stale": true,
+     "never_assessed": true
+    },
+    "prereq_chain": [
+     {
+      "slug": "scope",
+      "name": "作用域",
+      "domain": "JS",
+      "level": 3,
+      "level_name": "能应用",
+      "recall": 1.0,
+      "last_verified": "<TS>",
+      "verify_method": "predict",
+      "status": "active",
+      "fail_streak": 0,
+      "difficulty": 4.25,
+      "stale": false,
+      "never_assessed": false,
+      "depth": 1
+     }
+    ],
+    "count": 1
+   }
+  },
+  {
+   "args": [
+    "context",
+    "JS"
+   ],
+   "exit": 0,
+   "out": {
+    "topic": "JS",
+    "profile": {},
+    "known_atoms": [
+     {
+      "slug": "scope",
+      "name": "作用域",
+      "domain": "JS",
+      "level": 3,
+      "level_name": "能应用",
+      "recall": 1.0,
+      "last_verified": "<TS>",
+      "verify_method": "predict",
+      "status": "active",
+      "fail_streak": 0,
+      "difficulty": 4.25,
+      "stale": false,
+      "never_assessed": false
+     },
+     {
+      "slug": "closure",
+      "name": "闭包",
+      "domain": "JS",
+      "level": 0,
+      "level_name": "未学",
+      "recall": 0.0,
+      "last_verified": null,
+      "verify_method": null,
+      "status": "active",
+      "fail_streak": 0,
+      "difficulty": 5.0,
+      "stale": true,
+      "never_assessed": true
+     }
+    ],
+    "open_misconceptions": [],
+    "teaching_rules": [],
+    "domain_expertise": [
+     {
+      "domain": "JS",
+      "atoms": 2,
+      "applicable": 1,
+      "transfer_proven": 0,
+      "tier": "novice",
+      "guidance": "完整引导：最小可跑实例 → 为什么这样 → 一般化规则 → 边界/反例，四步都给"
+     }
+    ]
+   }
+  },
+  {
+   "args": [
+    "verify",
+    "closure",
+    "--result",
+    "fail",
+    "--method",
+    "predict"
+   ],
+   "exit": 0,
+   "out": {
+    "slug": "closure",
+    "result": "fail",
+    "method": "predict",
+    "level": 0,
+    "level_name": "未学",
+    "stability_days": 0.5,
+    "difficulty": 5.3,
+    "fail_streak": 1,
+    "status": "active",
+    "hint_feedback": "这次没记 --used-pref/--used-insight。如果刚才的讲解确实用到了 probe 给出的某条规则或画像，下次带上——否则错误的教法会一直伪装成「这个知识点难」",
+    "note": "只有 transfer（迁移到新情境）通过才算真掌握"
+   }
+  },
+  {
+   "args": [
+    "misconception",
+    "add",
+    "--atom",
+    "closure",
+    "--wrong",
+    "以为是全局变量",
+    "--correction",
+    "是词法环境的引用",
+    "--error-type",
+    "scope-confusion"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "id": 1,
+    "note": "复发次数高的误区，下次教到相关内容时主动提前拆解"
+   }
+  },
+  {
+   "args": [
+    "misconception",
+    "list"
+   ],
+   "exit": 0,
+   "out": [
+    {
+     "id": 1,
+     "atom_slug": "closure",
+     "wrong_belief": "以为是全局变量",
+     "correction": "是词法环境的引用",
+     "error_type": "scope-confusion",
+     "first_seen": "<TS>",
+     "last_seen": "<TS>",
+     "recurrence": 1,
+     "resolved": 0
+    }
+   ]
+  },
+  {
+   "args": [
+    "pref",
+    "add",
+    "--rule",
+    "先代码后术语",
+    "--scope",
+    "domain:JS",
+    "--evidence",
+    "t1"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "id": 1,
+    "active": false,
+    "promoted": false,
+    "note": "L2 规则需 2 次同向证据才生效；候选规则会一直挂着直到被证实或过期"
+   }
+  },
+  {
+   "args": [
+    "pref",
+    "add",
+    "--rule",
+    "先代码后术语",
+    "--scope",
+    "domain:JS",
+    "--evidence",
+    "t2"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "id": 1,
+    "active": true,
+    "promoted": true,
+    "note": "L2 规则需 2 次同向证据才生效；候选规则会一直挂着直到被证实或过期"
+   }
+  },
+  {
+   "args": [
+    "pref",
+    "list"
+   ],
+   "exit": 0,
+   "out": [
+    {
+     "id": 1,
+     "layer": "L2",
+     "scope": "domain:JS",
+     "concept_type": null,
+     "rule": "先代码后术语",
+     "polarity": "works",
+     "evidence_count": 2,
+     "active": 1,
+     "retired": 0,
+     "retired_reason": null,
+     "hits": 0,
+     "misses": 0,
+     "last_hit": null,
+     "last_miss": null
+    }
+   ]
+  },
+  {
+   "args": [
+    "get",
+    "closure"
+   ],
+   "exit": 0,
+   "out": {
+    "slug": "closure",
+    "name": "闭包",
+    "domain": "JS",
+    "aliases": "",
+    "user_phrasing": null,
+    "level": 0,
+    "stability": 0.5,
+    "difficulty": 5.3,
+    "last_verified": "<TS>",
+    "verify_method": "predict",
+    "source": null,
+    "status": "active",
+    "fail_streak": 1,
+    "notes": null,
+    "phase_id": null,
+    "created": "<TS>",
+    "updated": "<TS>",
+    "level_name": "未学",
+    "recall": 0.0,
+    "stale": true,
+    "never_assessed": false,
+    "prereqs": [
+     {
+      "slug": "scope",
+      "name": "作用域",
+      "level": 3,
+      "last_verified": "<TS>",
+      "stability": 1.28,
+      "fail_streak": 0,
+      "recall": 1.0
+     }
+    ],
+    "unlocks": [],
+    "misconceptions": [
+     {
+      "id": 1,
+      "atom_slug": "closure",
+      "wrong_belief": "以为是全局变量",
+      "correction": "是词法环境的引用",
+      "error_type": "scope-confusion",
+      "first_seen": "<TS>",
+      "last_seen": "<TS>",
+      "recurrence": 1,
+      "resolved": 0
+     }
+    ]
+   }
+  },
+  {
+   "args": [
+    "get",
+    "nonexistent"
+   ],
+   "exit": 0,
+   "out": {
+    "error": "not found",
+    "slug": "nonexistent"
+   }
+  },
+  {
+   "args": [
+    "set",
+    "closure",
+    "notes=测试"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "slug": "closure",
+    "updated": [
+     "notes"
+    ]
+   }
+  },
+  {
+   "args": [
+    "edge",
+    "add",
+    "scope",
+    "closure",
+    "--type",
+    "related"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "edge": "scope -[related]-> closure",
+    "action": "add"
+   }
+  },
+  {
+   "args": [
+    "add",
+    "typo",
+    "拼错",
+    "--prereq",
+    "nonexistent"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "slug": "typo",
+    "prereqs": [
+     "nonexistent"
+    ],
+    "unknown_refs": [
+     "nonexistent"
+    ],
+    "warning": "这些关联 atom 还不存在：nonexistent。如果是打算稍后补建就没问题；如果是 slug 拼错了，现在就用 edge rm 删掉，否则探针永远探不到它"
+   }
+  },
+  {
+   "args": [
+    "probe",
+    "typo"
+   ],
+   "exit": 0,
+   "out": {
+    "target": "typo",
+    "probe": [],
+    "skip": [],
+    "hint": "对 probe 列表每项出 1 道题；过了立刻继续，不过就地补 2-3 分钟",
+    "never_assessed_hint": "标了 never_assessed 的（含目标本身）从没被检验过——那只代表没有数据，不代表用户不会。开讲前先花十秒问一句，答得上来就直接 `verify --method transfer` 跳过去，别从头讲一遍。",
+    "dangling_prereqs": [
+     "nonexistent"
+    ],
+    "warning": "这些前置在库里不存在（多半是 slug 拼错）：nonexistent。请用 add 补建，或用 edge rm 删掉这条边——否则这些前置永远不会被探到"
+   }
+  },
+  {
+   "args": [
+    "doctor"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": false,
+    "issue_count": 1,
+    "issues": [
+     {
+      "kind": "dangling_edge",
+      "detail": "nonexistent -> typo",
+      "missing_atom": "nonexistent",
+      "fix": "learndb.py add nonexistent \"<名字>\"　或　learndb.py edge rm nonexistent typo"
+     }
+    ],
+    "schema_version": 7,
+    "hint": "按每条的 fix 处理；这些问题不会自己消失，而且大多是静默失败"
+   }
+  },
+  {
+   "args": [
+    "goal",
+    "add",
+    "g1",
+    "测试目标",
+    "--north-star",
+    "能做出X",
+    "--weekly-hours",
+    "10"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "slug": "g1",
+    "hint": "接下来用 phase add 建里程碑；只精细展开当前阶段+下一阶段预览，更远的阶段先只给粗粒度名字和验收标准，别急着展开到 atom/project"
+   }
+  },
+  {
+   "args": [
+    "phase",
+    "add",
+    "g1",
+    "阶段1",
+    "--seq",
+    "1",
+    "--objective",
+    "能A",
+    "--est-weeks",
+    "4",
+    "--detail",
+    "detailed"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "id": 1,
+    "seq": 1,
+    "hint": "第一个阶段建完后记得跑 phase start，把它设为当前阶段"
+   }
+  },
+  {
+   "args": [
+    "phase",
+    "add",
+    "g1",
+    "阶段2",
+    "--seq",
+    "2",
+    "--objective",
+    "能B",
+    "--est-weeks",
+    "6"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "id": 2,
+    "seq": 2,
+    "hint": "第一个阶段建完后记得跑 phase start，把它设为当前阶段"
+   }
+  },
+  {
+   "args": [
+    "phase",
+    "list",
+    "g1"
+   ],
+   "exit": 0,
+   "out": [
+    {
+     "id": 1,
+     "goal_slug": "g1",
+     "seq": 1,
+     "name": "阶段1",
+     "objective": "能A",
+     "detail_level": "detailed",
+     "est_weeks": 4.0,
+     "actual_weeks": null,
+     "status": "upcoming",
+     "started": null,
+     "ended": null,
+     "retrospective": null,
+     "created": "<TS>",
+     "progress": {
+      "atoms_total": 0,
+      "atoms_applicable": 0,
+      "atoms_transfer_proven": 0,
+      "projects_total": 0,
+      "projects_done": 0
+     }
+    },
+    {
+     "id": 2,
+     "goal_slug": "g1",
+     "seq": 2,
+     "name": "阶段2",
+     "objective": "能B",
+     "detail_level": "coarse",
+     "est_weeks": 6.0,
+     "actual_weeks": null,
+     "status": "upcoming",
+     "started": null,
+     "ended": null,
+     "retrospective": null,
+     "created": "<TS>",
+     "progress": {
+      "atoms_total": 0,
+      "atoms_applicable": 0,
+      "atoms_transfer_proven": 0,
+      "projects_total": 0,
+      "projects_done": 0
+     }
+    }
+   ]
+  },
+  {
+   "args": [
+    "phase",
+    "start",
+    "1"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "id": 1,
+    "next_phase_previewed": true,
+    "hint": "下一阶段已可以开始展开到 atom/project 级别；更远的阶段继续保持粗粒度"
+   }
+  },
+  {
+   "args": [
+    "add",
+    "a1",
+    "atom1",
+    "--phase",
+    "1"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "slug": "a1",
+    "prereqs": []
+   }
+  },
+  {
+   "args": [
+    "project",
+    "add",
+    "1",
+    "p1",
+    "项目1",
+    "--scaffold",
+    "训练循环已写好",
+    "--user-scope",
+    "你写 forward",
+    "--atom",
+    "a1"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "slug": "p1",
+    "atoms": [
+     "a1"
+    ]
+   }
+  },
+  {
+   "args": [
+    "project",
+    "add",
+    "999",
+    "ghost",
+    "幽灵",
+    "--scaffold",
+    "x",
+    "--user-scope",
+    "y"
+   ],
+   "exit": 0,
+   "out": {
+    "error": "phase #999 不存在，先 phase add"
+   }
+  },
+  {
+   "args": [
+    "phase",
+    "get",
+    "some-slug"
+   ],
+   "exit": 0,
+   "out": {
+    "error": "这个动作需要 phase 的数字 id，收到的是 'some-slug'。用 `phase list <goal_slug>` 查 id"
+   }
+  },
+  {
+   "args": [
+    "verify",
+    "a1",
+    "--result",
+    "pass",
+    "--method",
+    "transfer"
+   ],
+   "exit": 0,
+   "out": {
+    "slug": "a1",
+    "result": "pass",
+    "method": "transfer",
+    "level": 4,
+    "level_name": "能迁移",
+    "stability_days": 1.35,
+    "difficulty": 4.1,
+    "fail_streak": 0,
+    "status": "active",
+    "hint_feedback": "这次没记 --used-pref/--used-insight。如果刚才的讲解确实用到了 probe 给出的某条规则或画像，下次带上——否则错误的教法会一直伪装成「这个知识点难」"
+   }
+  },
+  {
+   "args": [
+    "project",
+    "done",
+    "p1"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "slug": "p1",
+    "linked_atoms": [
+     "a1"
+    ],
+    "hint": "项目完成不等于自动掌握——按用户实际写出的那部分表现，对上面每个 atom 跑一次 verify --method transfer，过了才算真到 level 4"
+   }
+  },
+  {
+   "args": [
+    "phase",
+    "close",
+    "1",
+    "--retro",
+    "比预期快"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "id": 1,
+    "actual_weeks": 0.0,
+    "est_weeks_was": 4.0,
+    "velocity_ratio": null,
+    "recalibrated_future_phases": [],
+    "advanced_to": {
+     "id": 2,
+     "name": "阶段2"
+    },
+    "hint": "把 recalibrated_future_phases 里的新估计如实告诉用户，说明只是参考不是承诺"
+   }
+  },
+  {
+   "args": [
+    "goal",
+    "roadmap",
+    "g1"
+   ],
+   "exit": 0,
+   "out": {
+    "goal": {
+     "slug": "g1",
+     "name": "测试目标",
+     "north_star": "能做出X",
+     "weekly_hours": 10.0,
+     "status": "active",
+     "notes": null,
+     "created": "<TS>",
+     "updated": "<TS>"
+    },
+    "phases": [
+     {
+      "id": 1,
+      "goal_slug": "g1",
+      "seq": 1,
+      "name": "阶段1",
+      "objective": "能A",
+      "detail_level": "detailed",
+      "est_weeks": 4.0,
+      "actual_weeks": 0.0,
+      "status": "done",
+      "started": "<TS>",
+      "ended": "<TS>",
+      "retrospective": "比预期快",
+      "created": "<TS>",
+      "progress": {
+       "atoms_total": 1,
+       "atoms_applicable": 1,
+       "atoms_transfer_proven": 1,
+       "projects_total": 1,
+       "projects_done": 1
+      },
+      "projects": [
+       {
+        "slug": "p1",
+        "name": "项目1",
+        "status": "done",
+        "est_effort": null
+       }
+      ]
+     },
+     {
+      "id": 2,
+      "goal_slug": "g1",
+      "seq": 2,
+      "name": "阶段2",
+      "objective": "能B",
+      "detail_level": "detailed",
+      "est_weeks": 6.0,
+      "actual_weeks": null,
+      "status": "current",
+      "started": "<TS>",
+      "ended": null,
+      "retrospective": null,
+      "created": "<TS>",
+      "progress": {
+       "atoms_total": 0,
+       "atoms_applicable": 0,
+       "atoms_transfer_proven": 0,
+       "projects_total": 0,
+       "projects_done": 0
+      },
+      "projects": []
+     }
+    ]
+   }
+  },
+  {
+   "args": [
+    "pref",
+    "retire",
+    "--id",
+    "1",
+    "--reason",
+    "回归测试"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "id": 1,
+    "retired_reason": "回归测试"
+   }
+  },
+  {
+   "args": [
+    "pref",
+    "add",
+    "--rule",
+    "先代码后术语",
+    "--scope",
+    "domain:JS",
+    "--evidence",
+    "t3"
+   ],
+   "exit": 0,
+   "out": {
+    "error": "id=1 这条规则已被作废（回归测试），不能靠追加同文本证据复活。确有必要的话，写一条新规则（换个 scope 或措辞），不要绕开 retire 的理由。"
+   }
+  },
+  {
+   "args": [
+    "due"
+   ],
+   "exit": 0,
+   "out": {
+    "topic": null,
+    "count": 0,
+    "due": [],
+    "hint": "复习先测后讲：先确认到底忘了多少，避免从头重讲浪费时间"
+   }
+  },
+  {
+   "args": [
+    "distill"
+   ],
+   "exit": 0,
+   "out": {
+    "pending": [],
+    "up_to_date": [],
+    "hint": "对 pending 里每一项：读完 source_records，提炼成一句可执行的认知特征（说清楚'该怎么教'而不是'用户是什么样的人'），然后 `profile --set \"insight:<type>=<提炼结果>\"`。pending 为空说明暂时没有够格提炼的类型，不要硬凑。"
+   }
+  },
+  {
+   "args": [
+    "review"
+   ],
+   "exit": 0,
+   "out": {
+    "structural": {
+     "count": 1,
+     "issues": [
+      {
+       "kind": "dangling_edge",
+       "detail": "nonexistent -> typo",
+       "missing_atom": "nonexistent",
+       "fix": "learndb.py add nonexistent \"<名字>\"　或　learndb.py edge rm nonexistent typo"
+      }
+     ],
+     "note": "代码确定判定的问题，按每条的 fix 直接处理"
+    },
+    "needs_judgment": {},
+    "attention": {
+     "isolated_atoms": {
+      "items": [
+       "a1"
+      ],
+      "note": "既没有前置也没有下游，可能是路线图断了或 slug 拼错"
+     }
+    },
+    "hint": "三块可信度不同，别混着报给用户：structural 是**确定的问题**（照 fix 修）；needs_judgment 是**待你判断的材料**，逐条读完再下结论，别假设现状就是对的；attention 只是**值得看一眼**，多数时候无需处理。读完给用户一份人话报告 + 修复清单，**等用户确认再动手改**。"
+   }
+  },
+  {
+   "args": [
+    "profile",
+    "--set",
+    "pace=扎实"
+   ],
+   "exit": 0,
+   "out": {
+    "pace": "扎实"
+   }
+  },
+  {
+   "args": [
+    "profile"
+   ],
+   "exit": 0,
+   "out": {
+    "pace": "扎实"
+   }
+  },
+  {
+   "args": [
+    "export",
+    "--path",
+    "{TMP}/k.md"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "path": "<TMP>/k.md"
+   }
+  },
+  {
+   "args": [
+    "backup"
+   ],
+   "exit": 0,
+   "out": {
+    "ok": true,
+    "backup": "<TMP>/backups/learn-<BK>.db"
+   }
+  },
+  {
+   "args": [
+    "status"
+   ],
+   "exit": 0,
+   "out": {
+    "db": "<TMP>/learn.db",
+    "profile": {
+     "pace": "扎实"
+    },
+    "atoms_total": 4,
+    "atoms_by_status": {
+     "active": 4
+    },
+    "atoms_by_level": {
+     "未学": 2,
+     "能应用": 1,
+     "能迁移": 1
+    },
+    "domains": [
+     "JS"
+    ],
+    "misconceptions_open": 1,
+    "active_prefs": 0,
+    "last_session": null,
+    "active_goals": [
+     {
+      "slug": "g1",
+      "name": "测试目标",
+      "current_phase": "阶段2",
+      "phase_objective": "能B",
+      "progress": {
+       "atoms_total": 0,
+       "atoms_applicable": 0,
+       "atoms_transfer_proven": 0,
+       "projects_total": 0,
+       "projects_done": 0
+      }
+     }
+    ]
+   }
+  }
+ ],
+ "db": {
+  "atoms": [
+   [
+    "scope",
+    "作用域",
+    "JS",
+    "scope",
+    null,
+    3,
+    1.28,
+    4.25,
+    "<TS>",
+    "predict",
+    null,
+    "active",
+    0,
+    null,
+    null,
+    "<TS>",
+    "<TS>"
+   ],
+   [
+    "closure",
+    "闭包",
+    "JS",
+    "",
+    null,
+    0,
+    0.5,
+    5.3,
+    "<TS>",
+    "predict",
+    null,
+    "active",
+    1,
+    "测试",
+    null,
+    "<TS>",
+    "<TS>"
+   ],
+   [
+    "typo",
+    "拼错",
+    null,
+    "",
+    null,
+    0,
+    1.0,
+    5.0,
+    null,
+    null,
+    null,
+    "active",
+    0,
+    null,
+    null,
+    "<TS>",
+    "<TS>"
+   ],
+   [
+    "a1",
+    "atom1",
+    null,
+    "",
+    null,
+    4,
+    1.35,
+    4.1,
+    "<TS>",
+    "transfer",
+    null,
+    "active",
+    0,
+    null,
+    1,
+    "<TS>",
+    "<TS>"
+   ]
+  ],
+  "edges": [
+   [
+    "scope",
+    "closure",
+    "prereq"
+   ],
+   [
+    "scope",
+    "closure",
+    "related"
+   ],
+   [
+    "nonexistent",
+    "typo",
+    "prereq"
+   ]
+  ],
+  "goals": [
+   [
+    "g1",
+    "测试目标",
+    "能做出X",
+    10.0,
+    "active",
+    null,
+    "<TS>",
+    "<TS>"
+   ]
+  ],
+  "guidance_feedback": [],
+  "meta": [
+   [
+    "schema_version",
+    "7"
+   ],
+   [
+    "created",
+    "<TS>"
+   ]
+  ],
+  "misconceptions": [
+   [
+    1,
+    "closure",
+    "以为是全局变量",
+    "是词法环境的引用",
+    "scope-confusion",
+    "<TS>",
+    "<TS>",
+    1,
+    0
+   ]
+  ],
+  "phases": [
+   [
+    1,
+    "g1",
+    1,
+    "阶段1",
+    "能A",
+    "detailed",
+    4.0,
+    0.0,
+    "done",
+    "<TS>",
+    "<TS>",
+    "比预期快",
+    "<TS>"
+   ],
+   [
+    2,
+    "g1",
+    2,
+    "阶段2",
+    "能B",
+    "detailed",
+    6.0,
+    null,
+    "current",
+    "<TS>",
+    null,
+    null,
+    "<TS>"
+   ]
+  ],
+  "profile": [
+   [
+    "pace",
+    "扎实",
+    "<TS>"
+   ]
+  ],
+  "project_atoms": [
+   [
+    "p1",
+    "a1"
+   ]
+  ],
+  "projects": [
+   [
+    "p1",
+    1,
+    "项目1",
+    null,
+    "训练循环已写好",
+    "你写 forward",
+    null,
+    "done",
+    null,
+    null,
+    "<TS>",
+    "<TS>",
+    "<TS>"
+   ]
+  ],
+  "sessions": [],
+  "teaching_prefs": [
+   [
+    1,
+    "L2",
+    "domain:JS",
+    null,
+    "先代码后术语",
+    "works",
+    "[{\"date\": \"<TS>\", \"signal\": \"t1\"}, {\"date\": \"<TS>\", \"signal\": \"t2\"}]",
+    2,
+    0,
+    0,
+    null,
+    "<TS>",
+    1,
+    "回归测试",
+    "<TS>"
+   ]
+  ]
+ }
+}
