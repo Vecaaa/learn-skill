@@ -11,6 +11,7 @@
 """
 
 import argparse
+import contextvars
 import json
 import math
 import os
@@ -149,6 +150,12 @@ def update_stability(s_old, difficulty, passed, ml, r_now):
 # schema 版本。加表/加列时 +1，并在 migrate() 里补上对应的升级动作。
 # migrate() 靠它走快速路径，避免每条命令都重跑一遍全量 DDL。
 SCHEMA_VERSION = 7
+
+
+def configure(db_path):
+    """库调用模式：指定数据库路径，等价于设置 LEARN_DB。进程级生效。"""
+    global DB_PATH
+    DB_PATH = os.path.abspath(os.path.expanduser(db_path))
 
 
 def connect():
@@ -392,7 +399,29 @@ def phase_progress(con, phase_id):
     }
 
 
+class LearnDBError(Exception):
+    """库调用模式（run）下的硬错误：参数解析失败、库未初始化、--help。
+
+    普通的业务错误（slug 不存在、字段不可写……）不走这里：CLI 一直是把它们
+    作为 {"error": ...} 打印出来并以 0 退出的，run() 照样把这个 dict 返回，
+    两条路径的行为保持一致。
+    """
+
+    def __init__(self, payload):
+        super().__init__(payload.get("error", "learndb error"))
+        self.payload = payload
+
+
+# 库调用模式下 out() 把结果收进这里而不是打印。用 ContextVar 而不是全局列表：
+# learn-tutor 会在多个线程里同时调用 run()，每次调用必须只拿到自己的输出。
+_OUT_SINK = contextvars.ContextVar("learndb_out_sink", default=None)
+
+
 def out(obj):
+    sink = _OUT_SINK.get()
+    if sink is not None:
+        sink.append(obj)
+        return
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
@@ -1819,9 +1848,21 @@ def cmd_backup(a, con):
 
 # ---------------------------------------------------------------- CLI
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+# ---------------------------------------------------------------- CLI / 库入口
+
+class _LibraryArgumentParser(argparse.ArgumentParser):
+    """库调用模式用：参数错误时抛 LearnDBError，而不是打印用法后 sys.exit(2)。
+    在 learn-tutor 的服务进程里 exit 会把整个服务带走。add_subparsers 默认用
+    父解析器的类创建子解析器，所以子命令的参数错误同样走这里。"""
+
+    def error(self, message):
+        raise LearnDBError({"error": f"参数错误：{message}",
+                            "usage": self.format_usage().strip()})
+
+
+def build_parser(parser_class=argparse.ArgumentParser):
+    ap = parser_class(description=__doc__,
+                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init", help="创建/升级数据库").set_defaults(fn=cmd_init)
@@ -1968,14 +2009,54 @@ def main():
     p.add_argument("--field", action="append", metavar="KEY=VALUE")
     p.set_defaults(fn=cmd_project)
 
-    a = ap.parse_args()
+    return ap
+
+
+def _prepare(con, cmd):
+    """每条命令执行前的公共步骤：确认库已初始化，再把老库升级到当前 schema。"""
+    if cmd == "init":
+        return
+    try:
+        con.execute("SELECT 1 FROM atoms LIMIT 1")
+    except sqlite3.OperationalError:
+        raise LearnDBError({"error": "数据库未初始化，先运行: python3 learndb.py init"})
+    migrate(con)  # 老库升级到新 schema（比如补上 goals/phases/projects 三张表）
+
+
+def run(argv):
+    """库调用入口：与 CLI 共用同一个参数解析器和同一批 cmd_* 函数，
+    返回 CLI 本该打印的那个对象（通常是 dict）。
+
+    learn-tutor 通过它读写 learn.db。之所以不另写一套 Python API：这样 CLI
+    和库按构造就是同一条代码路径，不会出现"同一个概念两处实现"（决策 16 的教训），
+    也守住了决策 6——所有库操作都走 learndb 的子命令。
+    """
+    try:
+        a = build_parser(_LibraryArgumentParser).parse_args([str(x) for x in argv])
+    except SystemExit:
+        raise LearnDBError({"error": "run() 不支持 --help 这类会直接退出进程的参数"})
+    sink = []
+    token = _OUT_SINK.set(sink)
     con = connect()
-    if a.cmd != "init":
-        try:
-            con.execute("SELECT 1 FROM atoms LIMIT 1")
-        except sqlite3.OperationalError:
-            out({"error": "数据库未初始化，先运行: python3 learndb.py init"}); sys.exit(1)
-        migrate(con)  # 老库升级到新 schema（比如补上 goals/phases/projects 三张表）
+    try:
+        _prepare(con, a.cmd)
+        a.fn(a, con)
+    finally:
+        con.close()
+        _OUT_SINK.reset(token)
+    if not sink:
+        return None
+    return sink[0] if len(sink) == 1 else sink
+
+
+def main():
+    a = build_parser().parse_args()
+    con = connect()
+    try:
+        _prepare(con, a.cmd)
+    except LearnDBError as e:
+        out(e.payload)
+        sys.exit(1)
     a.fn(a, con)
     con.close()
 

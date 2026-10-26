@@ -118,6 +118,21 @@ def run_cli_sequence(tmp):
     return {"steps": steps, "db": dump_db(db, tmp)}
 
 
+def run_lib_sequence(tmp):
+    """与 run_cli_sequence 相同的命令序列，但走库调用入口 run()。"""
+    import importlib.util
+    db = os.path.join(tmp, "learn.db")
+    spec = importlib.util.spec_from_file_location("learndb_golden", LEARNDB)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.configure(db)
+    steps = []
+    for args in CASES:
+        out = mod.run(expand(args, tmp))
+        steps.append({"args": args, "exit": 0, "out": normalize(out, tmp)})
+    return {"steps": steps, "db": dump_db(db, tmp)}
+
+
 def load_golden():
     with open(GOLDEN, encoding="utf-8") as f:
         return json.load(f)
