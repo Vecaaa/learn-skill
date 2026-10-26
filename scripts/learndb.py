@@ -22,7 +22,10 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------- 基础设施
 
 DEFAULT_DIR = os.path.expanduser("~/.claude/learning")
-DB_PATH = os.environ.get("LEARN_DB", os.path.join(DEFAULT_DIR, "learn.db"))
+# 与 configure() 一样展开 ~ 并转成绝对路径：LEARN_DB=foo.db（无目录部分）时
+# os.path.dirname 得到 ""，connect() 里的 makedirs("") 会直接崩溃。
+DB_PATH = os.path.abspath(os.path.expanduser(
+    os.environ.get("LEARN_DB", os.path.join(DEFAULT_DIR, "learn.db"))))
 
 # 检验强度分级：只有 transfer（迁移到新情境）才配得上 level 4。
 # 复述能过不代表会用，这条映射是掌握度不虚高的关键。
@@ -1754,8 +1757,11 @@ def cmd_session(a, con):
                 # 新建一条。旧实现在这里更新 MAX(id)，导致每次 checkpoint 都覆盖上一次的
                 # 记录——真实库里一条会话从 08-04 被覆盖到 10-15，期间的摘要和信号全丢了。
                 sid = con.execute("INSERT INTO sessions(started) VALUES(?)", (now(),)).lastrowid
-        con.execute("UPDATE sessions SET ended=?, atoms_touched=?, summary=?, signals=? WHERE id=?",
-                    (now(), ",".join(a.atoms or []), a.summary, a.signals, sid))
+        cur = con.execute("UPDATE sessions SET ended=?, atoms_touched=?, summary=?, signals=? WHERE id=?",
+                          (now(), ",".join(a.atoms or []), a.summary, a.signals, sid))
+        if cur.rowcount == 0:  # --id 指向不存在的会话：不能谎报 ok
+            out({"error": "not found", "session_id": sid})
+            return
         con.commit(); out({"ok": True, "session_id": sid})
 
 
@@ -1867,6 +1873,11 @@ def cmd_backup(a, con):
         con.backup(bk)
         # 备份改回单文件的 rollback 模式：打开备份时不会在 backups/ 里生成 -wal/-shm
         bk.execute("PRAGMA journal_mode=DELETE")
+    except BaseException:
+        bk.close()
+        if os.path.exists(p):  # 半成品不留着：它会占 20 份保留额度，还会被误当成最新备份
+            os.remove(p)
+        raise
     finally:
         bk.close()
     keep = sorted(os.listdir(dst))[-20:]
@@ -1888,6 +1899,11 @@ class _LibraryArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         raise LearnDBError({"error": f"参数错误：{message}",
                             "usage": self.format_usage().strip()})
+
+    def _print_message(self, message, file=None):
+        # --help 会先把用法打印到 stdout 再退出；库模式下什么都不该打印
+        # （run() 随后把 SystemExit 转成 LearnDBError）。
+        pass
 
 
 def build_parser(parser_class=argparse.ArgumentParser):
@@ -2067,12 +2083,14 @@ def run(argv):
         raise LearnDBError({"error": "run() 不支持 --help 这类会直接退出进程的参数"})
     sink = []
     token = _OUT_SINK.set(sink)
-    con = connect()
     try:
-        _prepare(con, a.cmd)
-        a.fn(a, con)
+        con = connect()  # 放在 try 里：connect() 抛错时也要还原收集器
+        try:
+            _prepare(con, a.cmd)
+            a.fn(a, con)
+        finally:
+            con.close()
     finally:
-        con.close()
         _OUT_SINK.reset(token)
     if not sink:
         return None

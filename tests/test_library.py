@@ -1,5 +1,9 @@
+import contextlib
 import importlib.util
+import io
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -47,6 +51,31 @@ class LibraryTest(unittest.TestCase):
         with self.assertRaises(self.ldb.LearnDBError):
             self.ldb.run(["status", "--help"])
 
+    def test_help_prints_nothing(self):
+        """库模式下 --help 只抛 LearnDBError，不能往服务进程的 stdout/stderr 打印用法。"""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(self.ldb.LearnDBError):
+                self.ldb.run(["status", "--help"])
+        self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+
+    def test_connect_failure_does_not_leak_output_sink(self):
+        """connect() 抛错时不能把收集器留在 ContextVar 里，否则之后的 out() 全被静默吞掉。"""
+        blocker = os.path.join(self.tmp, "blocker")
+        open(blocker, "w").close()
+        self.ldb.configure(os.path.join(blocker, "sub", "x.db"))  # 父路径是文件，makedirs 必失败
+        with self.assertRaises(OSError):
+            self.ldb.run(["status"])
+        self.assertIsNone(self.ldb._OUT_SINK.get())
+
+    def test_relative_learn_db_env_works(self):
+        """LEARN_DB 是相对路径（无目录部分）时，早期实现 makedirs('') 直接崩溃。"""
+        env = dict(os.environ, LEARN_DB="rel.db")
+        r = subprocess.run([sys.executable, golden.LEARNDB, "init"], cwd=self.tmp, env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "rel.db")))
+
     def test_uninitialized_db_raises(self):
         with self.assertRaises(self.ldb.LearnDBError) as cm:
             self.ldb.run(["status"])
@@ -76,6 +105,25 @@ class LibraryTest(unittest.TestCase):
             t.join()
         self.assertEqual(errors, [])
         self.assertEqual(results, {i: f"t{i}" for i in range(8)})
+
+    def test_threads_write_concurrently(self):
+        self.ldb.run(["init"])
+        errors = []
+
+        def worker(i):
+            for j in range(10):
+                try:
+                    self.ldb.run(["add", f"w{i}-{j}", "x"])
+                except Exception as e:  # noqa: BLE001
+                    errors.append(repr(e))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(self.ldb.run(["status"])["atoms_total"], 60)
 
     def test_library_matches_golden(self):
         self.assertEqual(golden.run_lib_sequence(self.tmp), golden.load_golden())
@@ -116,6 +164,18 @@ class SessionTest(unittest.TestCase):
         res = self.ldb.run(["session", "close", "--summary", "s"])
         self.assertIn("error", res)
         self.assertEqual([r[1] for r in self.rows()], [0, 0])
+
+    def test_close_unknown_id_is_an_error(self):
+        res = self.ldb.run(["session", "close", "--id", 99, "--summary", "s"])
+        self.assertIn("error", res)
+        self.assertEqual(self.rows(), [])
+
+    def test_start_close_then_bare_close_starts_a_new_row(self):
+        a = self.ldb.run(["session", "start"])["session_id"]
+        self.ldb.run(["session", "close", "--summary", "一"])
+        b = self.ldb.run(["session", "close", "--summary", "二"])["session_id"]
+        self.assertNotEqual(a, b)
+        self.assertEqual(self.rows(), [(a, 1, "一"), (b, 1, "二")])
 
     def test_close_with_explicit_id(self):
         a = self.ldb.run(["session", "start"])["session_id"]

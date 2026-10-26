@@ -78,6 +78,39 @@ class ConcurrencyTest(unittest.TestCase):
         finally:
             bk.close()
 
+    def test_export_checkpoints_the_wal(self):
+        """export 之后通常紧跟着 git 提交 learn.db，所以 export 要把 WAL 合并回主文件。"""
+        holder = sqlite3.connect(self.db)  # 保持连接，WAL 才不会在 run() 关闭连接时被自动合并
+        holder.execute("SELECT COUNT(*) FROM atoms").fetchone()
+        try:
+            self.ldb.run(["add", "inwal", "只在 WAL 里"])
+            wal = self.db + "-wal"
+            self.assertGreater(os.path.getsize(wal), 0)  # 前提：数据确实还在 WAL 里
+            self.ldb.run(["export", "--path", os.path.join(self._tmp.name, "k.md")])
+            self.assertEqual(os.path.getsize(wal), 0)
+        finally:
+            holder.close()
+
+    def test_failed_backup_leaves_no_partial_file(self):
+        """备份中途失败留下的半成品会占 20 份保留额度，还会被误当成"最新备份"。"""
+        real_connect = self.ldb.connect
+
+        class FailingBackup:
+            def __init__(self, con):
+                self._con = con
+
+            def __getattr__(self, name):
+                return getattr(self._con, name)
+
+            def backup(self, target):
+                self._con.backup(target)
+                raise sqlite3.OperationalError("disk full (simulated)")
+
+        self.ldb.connect = lambda: FailingBackup(real_connect())
+        with self.assertRaises(sqlite3.OperationalError):
+            self.ldb.run(["backup"])
+        self.assertEqual(os.listdir(os.path.join(self._tmp.name, "backups")), [])
+
 
 if __name__ == "__main__":
     unittest.main()
