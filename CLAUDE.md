@@ -79,6 +79,10 @@
 | **哨兵值和真实值有没有被混为一谈** | 从未验证过的 atom，`recall_prob` 返回 0.0 表示"没有数据"，但 `update_stability` 把它读成"预期已忘光却答对了→大幅加分" → 首次通过的 stability 被系统性高估 |
 | **新加的分类/标签字段有没有防漂移机制** | `error_type` 写成 `notation`/`Notation`/`notations` 会把同类记录拆散，`distill` 永远达不到阈值 —— 标签看着都在，抽象层实际已失效，且完全无声 |
 | **每次都跑的命令，输出会不会随时间膨胀** | `probe` 每次都带 `teaching_guidance`，其中 `insights` 原本没有条数上限 —— 画像攒到几十条后，每教一个 atom 都要把它们全塞进上下文 |
+| **换了存储模式，直接操作文件的代码有没有跟上** | 开 WAL 后 `backup` 仍用 `shutil.copy2` 复制主文件，未 checkpoint 的数据不在备份里 |
+| **"不传 id 就取最新一条"这类隐式选择** | `session close` 更新 `MAX(id)`，每次 checkpoint 覆盖上一次会话 |
+| **同一份输入，两个入口的预处理一致吗** | `configure()` 会 `abspath`+`expanduser`，环境变量 `LEARN_DB` 不会 → `LEARN_DB=foo.db` 时 `makedirs("")` 崩溃 |
+| **失败路径有没有留下半成品 / 泄漏的状态** | `backup` 中途失败留下残缺文件占保留额度；`run()` 里 `connect()` 抛错时 ContextVar 收集器没还原，之后的 `out()` 全被吞；`session close --id` 指向不存在的行却返回 ok |
 
 **2. 检查渐进披露有没有退化。**
 SKILL.md 每次触发都会整份进上下文，所以它只该放"每次教学都用得上"的东西。
@@ -104,7 +108,7 @@ SKILL.md 每次触发都会整份进上下文，所以它只该放"每次教学�
 
 | 文件 | 谁读 | 职责 | 长度约束 |
 |---|---|---|---|
-| `SKILL.md` | Claude，每次触发 | 主循环、硬约束、reference 索引 | 保持 <500 行；已用 272 |
+| `SKILL.md` | Claude，每次触发 | 主循环、硬约束、reference 索引 | 保持 <500 行；已用 303 |
 | `references/pedagogy.md` | 按需 | 讲解协议、降维梯细节、检验题设计 | 有目录 |
 | `references/research.md` | 按需 | 检索分层、源优先级、防幻觉、登录 | 有目录 |
 | `references/planning.md` | 按需 | 跨月大目标的阶段规划、项目设计、滚动校准 | 有目录 |
@@ -112,6 +116,7 @@ SKILL.md 每次触发都会整份进上下文，所以它只该放"每次教学�
 | `references/memory-schema.md` | 按需 | 表结构、遗忘模型、命令全表 | 有目录 |
 | `references/evolution.md` | 按需 | 三层进化、证据门槛、防膨胀 | 有目录 |
 | `scripts/learndb.py` | 执行 | **所有**数据库操作的唯一入口 | 单文件，子命令式 |
+| `tests/` | 你 | unittest：黄金基线（CLI 输出逐字比对）、库调用、并发、会话记账 | — |
 | `README.md` | 用户 | 面向人的说明 | — |
 | `CLAUDE.md` | 你 | 这份 | — |
 
@@ -538,6 +543,36 @@ stability 涨得更慢 → 探针更频繁 → 看起来"确实很难"）。
 这个命令价值的证据：这些问题在库里存在了整场会话，`doctor` 全绿，没有任何
 其他机制会发现它们。
 
+### 24. 库调用入口 `run(argv)` + WAL：为 learn-tutor 共用同一个库
+
+**为什么**：learn-tutor（`~/projects/learn-tutor`）是这个 skill 的另一个前端，与 Claude Code
+中的 `/learn` 共用同一个 learn.db。它需要在自己的进程里调用 learndb，并且两边可能同时读写。
+
+**`run(argv)` 而不是另写一套 Python API**：`run()` 与 CLI 共用 `build_parser()` 和同一批
+`cmd_*` 函数，`out()` 在库模式下把结果收进 ContextVar 收集器。CLI 和库按构造就是同一条
+代码路径——另写 API 会变成"同一个概念两处实现"（决策 16 的教训），而且近 90 处 `out()`
+逐个改成 `return`，漏掉某个分支 `out()` 之后还有的语句（比如 commit）不会有任何报错。
+业务错误照旧是返回 `{"error": ...}`；只有参数错误、库未初始化、`--help` 抛 `LearnDBError`
+（在服务进程里 `sys.exit` 会带走整个服务；`--help` 也不往 stdout 打印用法）。
+**约束**：一个 `cmd_*` 在一次调用里只能 `out()` 一次，否则 `run()` 会返回列表而调用方不会料到
+（复审时用 AST + 逐条命令计数确认过现状，新增命令时要守住）。
+
+**WAL 的连带改动，缺一不可**：
+- `backup` 改用 SQLite backup API：WAL 下未 checkpoint 的提交在 `-wal` 文件里，
+  `shutil.copy2` 只复制主文件，备份会静默缺数据；备份中途失败会删掉半成品；
+- `export` 末尾 `wal_checkpoint(TRUNCATE)`：export 之后通常会 git 提交 learn.db
+  （有长读事务时最多阻塞 5 秒——`timeout=5.0` ——然后放弃合并，不报错）；
+- `~/.claude/learning/.gitignore` 忽略 `-wal`/`-shm`；
+- learn-tutor 用短连接（每次 `run()` 自己开关），空闲时 WAL 会被合并回主文件。
+
+resume skill 的 `learn_bridge.py` 用 `mode=ro` 只读打开，WAL 下照常可读（`tests/test_concurrency.py`
+有用例）。
+
+**顺带修的 bug**：`session close` 不传 `--id` 时更新 `MAX(id)`，每次 checkpoint 都覆盖上一次。
+现在无 `--id` 时：恰有一个未结束会话就关它，没有就新建一行再关，多个则报错。
+**局限**：一个遗留的、从没 close 的 `session start` 会被后来的无 `--id` close 当成目标——
+调用方有 session id 时应显式传 `--id`（learn-tutor 的 checkpoint 就是这样做的）。
+
 ---
 
 ## 可调参数
@@ -658,7 +693,16 @@ learn 建目标。
 
 ## 如何验证改动
 
-改完 `learndb.py` 后跑一遍冒烟测试（用临时库，不碰用户真实数据）：
+**先跑自动测试**（标准库 unittest，用临时库）：
+
+```bash
+cd ~/.claude/skills/learn && python3 -m unittest discover -s tests -v
+```
+
+`test_cli_matches_golden` 失败说明 CLI 输出变了。若是**有意**的改变，重录基线：
+`python3 tests/golden.py --record`，并在提交信息里写明哪条命令的输出为什么变。
+
+改完 `learndb.py` 后再跑一遍冒烟测试（用临时库，不碰用户真实数据）：
 
 ```bash
 cd ~/.claude/skills/learn/scripts
@@ -818,3 +862,4 @@ unset LEARN_DB && rm -f /tmp/reg.db
 | 2026-08-05 | **第二次架构复审**（触发条件：本次会话累计改动 759 行，是 ~100 行阈值的 7 倍）。按流程"先假设有 bug、逐条用命令验证"列了 7 条疑点，**4 条是真 bug、2 条是隐患**，全部已修，并据此给复审疑点清单新增了 4 个类型（见上）。① **`PROBE_THRESHOLD` 语义漂移**（最严重）：`recall_prob` 从指数换成乘方曲线时，没有重算依赖它的 `PROBE_THRESHOLD=0.7`/`DUE_THRESHOLD=0.6`——这两个值是按指数曲线校准的，换曲线后探针触发时刻推迟了 **10.8 倍**（S=2.15 的 atom 从"0.8 天后探"变成"8.2 天后探"），正好命中改动指引里"它以为我会但我早忘了"那条抱怨。修法不是随便调大，而是**让阈值和新曲线的语义对齐**：乘方曲线下 R=0.9 恰好解出 t=S，所以 `PROBE_THRESHOLD=0.9` 让探针正好在 `stability_days` 天后触发，这个字段名从此名副其实；`DUE_THRESHOLD=0.8`（t=2.25S）保持"复习列表比探针晚"的相对关系。② **哨兵值语义混淆**：首次 verify 时 `last_verified` 为空，`recall_prob` 返回 0.0 表示"没有数据"，但 `update_stability` 把低 recall 读作"通过得很意外→记得比预期牢→大幅加 stability"，两种含义混在一起让首次通过的 stability 高估近一倍（2.13 vs 合理的 1.28）。修法：新增 `FIRST_VERIFY_RECALL=0.9`，首次验证时代入它而非 0.0。③ **标签漂移无检测**：`error_type`/`concept_type`/`domain` 写成大小写或单复数不同的变体时，同类记录被拆散、`distill` 永远达不到阈值，而 `doctor` 一声不吭——这是最危险的那种失败（标签看着都在，抽象层已失效）。`doctor` 新增 `tag_drift` 检查（归一化后相同但字面不同即报，带 retag 修复命令）。④ **`export` 漏了新字段**（与第一次复审漏掉路线图同类）：`difficulty`/`error_type`/`concept_type`/引导档位都不在人类可读快照里。⑤ 隐患：`probe` 的 `insights` 无条数上限，而 `probe` 是每个 atom 都跑的命令 → 加 `MAX_INSIGHTS_IN_GUIDANCE=8` 并在超限时提示合并。⑥ 隐患：`distill` 把已 resolve 的误区计入阈值却不标注 → 保留计入（历史证据对提炼画像仍有价值）但在 `source_records` 里加 `resolved` 标记。渐进披露检查：SKILL.md 272 行，未超 500 上限。全套冒烟 + 8 项已修 bug 回归 + 边界用例通过，`doctor` 干净。**另外抓到 6 处文档与代码不一致**（同属静默失效——下一个冷启动的会话会照着过时的数字理解系统）：决策 3 里写死的 `recall < 0.7`、文件职责表里 SKILL.md「已用约 170」（实际 272）、可调参数表里 `PROBE_THRESHOLD`/`DUE_THRESHOLD` 的旧值、以及两条早已被 `update_stability()`/`update_difficulty()` 取代的 stability 增长率/衰减率条目，全部同步；并补上 `FIRST_VERIFY_RECALL`、`MAX_INSIGHTS_IN_GUIDANCE` 这两个新常数。**教训：改常数时顺手 grep 一遍它在文档里的所有出现**——可调参数表尤其容易漏，它是下次想调参的人唯一会看的地方，写着旧值等于主动误导。 |
 | 2026-08-05 | **引导量按 domain 熟练度 + 诊断材料挂到 `probe`**（决策 21，无 schema 变更）。这一项把上一轮列出的方向 A 和 ① 合并实现，因为两者是同一件事的两面（"教之前该知道什么"），且共享同一个可靠挂载点。A：新增 `domain_expertise()`，按该 domain 下 level≥3 的 atom 绝对数分三档（<3 novice / 3–6 developing / ≥7 proficient）决定引导总量——原来只按单个 atom 的 `level` 判断，而新 atom 永远是 level 0，导致每个新知识点都从最完整的四步模板讲起，对已有基础的学习者反而降低理解（专家反转效应）。①：新增 `teaching_guidance()`，把引导档位 + 已提炼的 `insights` + 按 `concept_type` 分组的生效规则一次性挂进 `probe` 的返回——`probe` 是教学循环里每个 atom 都必跑的第一步，是最稳定的挂载点，比"记得先查规律再讲"这种文字指令可靠得多（同决策 18）。`context` 也返回 `domain_expertise`（可跨多个 domain）。`pedagogy.md` 新增"引导总量按领域熟练度定"一节，`SKILL.md` 的探针/讲解两步改写。**顺带修掉两个静默失败**：`probe`/`plan` 传一个不存在的 slug 时原本静默返回空列表（看起来像"没有前置要探/要补"，实际可能只是拼错），现在给干净报错——`probe` 的那处还因为这次新增的 `_col(target, "domain")` 变成了崩溃（`None` 抛 `TypeError`，`_col` 原本只捕 `IndexError`/`KeyError`），一并修了。全套回归 + 边界用例（无 domain 的 atom、空 context、不存在的 slug）通过。 |
 | 2026-08-05 | **抽象层统一设计：`error_type` + `distill`**（决策 20，`SCHEMA_VERSION` 5→6）。用户要求重点优化"教学"而非"复习"方向，第二轮外部研究（专家反转效应、ITS 的 buggy model/error taxonomy、自我解释元分析）后确定做这一项。核心认识：`teaching_prefs` 和 `misconceptions` 存的都是具体记录，跨领域时归零——这是记忆机制最根本的天花板。修法是同一个模式在三处落地（不是三个独立特性）：`misconceptions` 加 `error_type`（对称于上一轮加的 `concept_type`），新增 `misconception retag` 和 `--error-type` 跨域查询；新增 `distill` 命令，把"该提炼成认知画像了"变成能被算出来的状态（记录数够阈值 + `profile` 无对应 `insight:` 条目或条目已过时），输出附带全部原始记录供模型提炼，已挂进完整版 checkpoint（同决策 18 的原则）。**踩到的坑值得记**：第一次给库里 5 条误区打 `error_type` 打出 5 个互不相同的类型，`distill` 一条都触发不了——抽象标签如果每条记录一个就等于没建，判断标准是"补救策略是不是同一套"而非"看起来像不像"；重新归类合并出 `aggregate-vs-instance` 和 `existential-claim` 两类（各 2 条），提炼出库里最初的两条 `insight:`。`pedagogy.md`/`evolution.md`/`memory-schema.md`/`SKILL.md` 同步更新，全套回归 + v4 老库迁移测试通过。 |
+| 2026-10-26 | **为 learn-tutor 共用数据库做准备**（决策 24，无 schema 变更）。新增库调用入口 `run(argv)`（与 CLI 共用解析器和 cmd_*，ContextVar 收集输出）、`configure()`、`LearnDBError`；连接开 WAL；`backup` 改用 SQLite backup API；`export` 末尾 wal_checkpoint；修复 `session close` 更新 `MAX(id)` 导致每次 checkpoint 覆盖上一次会话的 bug（真实库一条记录从 08-04 覆盖到 10-15）。新增 `tests/`（unittest）：黄金基线逐字比对 44 条命令的 CLI 输出与最终库状态、库调用、两进程并发写、mode=ro 读 WAL、备份完整性、会话记账。**复审（按本文流程，逐条用命令验证）又查出 5 个小问题，均已修并各配一条先红后绿的测试**：① `run([...,"--help"])` 在抛 `LearnDBError` 前先往 stdout 打印用法；② `run()` 里 `connect()` 抛错时 ContextVar 收集器未还原；③ `session close --id <不存在>` 返回 ok 而没有任何行被更新；④ `backup` 中途失败留下半成品文件；⑤ `LEARN_DB=foo.db`（无目录部分）时 `makedirs("")` 崩溃（老问题，早于本次改动）。另补测试：export 的 checkpoint、start→close→无 id close、多线程并发写。确认无问题的：`DB_PATH` 全部在函数运行时读取（`configure()` 后 init/status/export/backup 路径同步变化）；44 条黄金命令与 AST 检查均未发现一次调用 `out()` 两次；SKILL.md 303 行未变且其轻量 checkpoint 只调 `session close`，与新语义一致。顺带把文件职责表里陈旧的 SKILL.md 行数（272）更正为 303。 |

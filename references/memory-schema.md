@@ -39,10 +39,12 @@
 
 ```
 ~/.claude/learning/
-├── learn.db          # 唯一真源
+├── learn.db          # 唯一真源（WAL 模式）
+├── learn.db-wal      # WAL 日志，SQLite 自动管理；git 忽略
+├── learn.db-shm      # WAL 共享内存索引；git 忽略
 ├── knowledge.md      # export 生成的可读快照
 ├── sources.jsonl     # 站点注册表（见 research.md），不含凭据
-└── backups/          # backup 生成，保留最近 20 份
+└── backups/          # backup 生成（SQLite backup API，单文件），保留最近 20 份
 ```
 
 可用环境变量 `LEARN_DB` 覆盖数据库路径（多套知识库、或测试时有用）。
@@ -134,6 +136,10 @@ pref 累计 miss ≥ `PREF_MISS_LIMIT` 且多于 hit 会**自动降回候选**�
 ### `sessions` — 会话记账
 
 每次结束写 ≤5 行摘要 + 观察到的信号。不要写长篇，长篇没人看也没法聚合。
+
+`session close` 不传 `--id` 时：恰有一个未结束的会话就关闭它；没有就新建一条并立即关闭
+（轻量 checkpoint 只调 close，所以每次 checkpoint 都是独立的一行）；有多个就报错要求 `--id`。
+早期实现在这里更新 `MAX(id)`，每次 checkpoint 都覆盖上一次的记录。
 
 ---
 
