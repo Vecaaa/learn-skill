@@ -1740,7 +1740,20 @@ def cmd_session(a, con):
         cur = con.execute("INSERT INTO sessions(started,goal) VALUES(?,?)", (now(), a.goal))
         con.commit(); out({"session_id": cur.lastrowid, "started": now()})
     else:
-        sid = a.id or con.execute("SELECT MAX(id) FROM sessions").fetchone()[0]
+        sid = a.id
+        if sid is None:
+            open_ids = [r[0] for r in con.execute(
+                "SELECT id FROM sessions WHERE ended IS NULL ORDER BY id")]
+            if len(open_ids) > 1:
+                out({"error": f"有 {len(open_ids)} 个未结束的会话 {open_ids}，用 --id 指定要关闭哪一个"})
+                return
+            if open_ids:
+                sid = open_ids[0]
+            else:
+                # 没有未结束的会话（SKILL.md 的轻量 checkpoint 就是只调 close、不调 start）：
+                # 新建一条。旧实现在这里更新 MAX(id)，导致每次 checkpoint 都覆盖上一次的
+                # 记录——真实库里一条会话从 08-04 被覆盖到 10-15，期间的摘要和信号全丢了。
+                sid = con.execute("INSERT INTO sessions(started) VALUES(?)", (now(),)).lastrowid
         con.execute("UPDATE sessions SET ended=?, atoms_touched=?, summary=?, signals=? WHERE id=?",
                     (now(), ",".join(a.atoms or []), a.summary, a.signals, sid))
         con.commit(); out({"ok": True, "session_id": sid})

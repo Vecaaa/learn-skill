@@ -81,5 +81,48 @@ class LibraryTest(unittest.TestCase):
         self.assertEqual(golden.run_lib_sequence(self.tmp), golden.load_golden())
 
 
+class SessionTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self._tmp.name, "learn.db")
+        self.ldb = load_learndb(self.db)
+        self.ldb.run(["init"])
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def rows(self):
+        import sqlite3
+        con = sqlite3.connect(self.db)
+        try:
+            return con.execute("SELECT id, ended IS NOT NULL, summary FROM sessions ORDER BY id").fetchall()
+        finally:
+            con.close()
+
+    def test_repeated_close_without_start_keeps_every_checkpoint(self):
+        self.ldb.run(["session", "close", "--summary", "第一次"])
+        self.ldb.run(["session", "close", "--summary", "第二次"])
+        self.assertEqual(self.rows(), [(1, 1, "第一次"), (2, 1, "第二次")])
+
+    def test_close_updates_the_single_open_session(self):
+        sid = self.ldb.run(["session", "start", "--goal", "g"])["session_id"]
+        res = self.ldb.run(["session", "close", "--summary", "s"])
+        self.assertEqual(res["session_id"], sid)
+        self.assertEqual(self.rows(), [(sid, 1, "s")])
+
+    def test_close_with_several_open_sessions_requires_id(self):
+        self.ldb.run(["session", "start"])
+        self.ldb.run(["session", "start"])
+        res = self.ldb.run(["session", "close", "--summary", "s"])
+        self.assertIn("error", res)
+        self.assertEqual([r[1] for r in self.rows()], [0, 0])
+
+    def test_close_with_explicit_id(self):
+        a = self.ldb.run(["session", "start"])["session_id"]
+        self.ldb.run(["session", "start"])
+        self.ldb.run(["session", "close", "--id", a, "--summary", "s"])
+        self.assertEqual(self.rows()[0], (a, 1, "s"))
+
+
 if __name__ == "__main__":
     unittest.main()
