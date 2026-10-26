@@ -15,7 +15,6 @@ import contextvars
 import json
 import math
 import os
-import shutil
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -160,8 +159,15 @@ def configure(db_path):
 
 def connect():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
+    # timeout=5：等价于 PRAGMA busy_timeout=5000。另一个进程（learn-tutor、另一个
+    # Claude Code 会话）正在写时最多等 5 秒，而不是立刻抛 database is locked。
+    con = sqlite3.connect(DB_PATH, timeout=5.0)
     con.row_factory = sqlite3.Row
+    # WAL：读写可以并发——learn-tutor 的页面在读、Claude Code 里的 /learn 在写，
+    # 互不阻塞。这个模式写在数据库文件头里，是持久的。
+    # 代价：还没 checkpoint 的提交暂存在 learn.db-wal 里，所以 backup 不能再直接
+    # 复制文件（见 cmd_backup），~/.claude/learning 的 git 也要忽略 -wal/-shm。
+    con.execute("PRAGMA journal_mode=WAL")
     # 注意：这里刻意不开 PRAGMA foreign_keys。表结构里没有 REFERENCES 声明
     # （加 FK 需要重建已有表，代价大于收益），引用完整性靠两层保证：
     # 写入时校验（project add 会拒绝不存在的 phase）+ doctor 命令定期体检。
@@ -1830,6 +1836,9 @@ def cmd_export(a, con):
                         lines.append(f"- 阶段 {ph['seq']}「{ph['name']}」：{ph['retrospective']}")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+    # export 之后通常紧跟着 git 提交 learn.db（完整版 checkpoint）。先把 WAL 合并回
+    # 主文件，提交进 git 的才是完整数据；有其他连接在读时合并不完全也不会报错。
+    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     out({"ok": True, "path": path})
 
 
@@ -1838,7 +1847,15 @@ def cmd_backup(a, con):
     dst = os.path.join(os.path.dirname(DB_PATH), "backups")
     os.makedirs(dst, exist_ok=True)
     p = os.path.join(dst, f"learn-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db")
-    shutil.copy2(DB_PATH, p)
+    # 用 SQLite 的 backup API 而不是复制文件：WAL 模式下还没 checkpoint 的提交
+    # 在 learn.db-wal 里，shutil.copy2 只复制主文件，得到的是缺数据的备份。
+    bk = sqlite3.connect(p)
+    try:
+        con.backup(bk)
+        # 备份改回单文件的 rollback 模式：打开备份时不会在 backups/ 里生成 -wal/-shm
+        bk.execute("PRAGMA journal_mode=DELETE")
+    finally:
+        bk.close()
     keep = sorted(os.listdir(dst))[-20:]
     for f in os.listdir(dst):
         if f not in keep:
