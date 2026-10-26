@@ -1742,27 +1742,46 @@ def cmd_session(a, con):
     if a.action == "start":
         cur = con.execute("INSERT INTO sessions(started,goal) VALUES(?,?)", (now(), a.goal))
         con.commit(); out({"session_id": cur.lastrowid, "started": now()})
-    else:
+        return
+    # close。目标会话的选择规则（见 CLAUDE.md 决策 24）：
+    #   --new           总是新建一整行（程序化调用方推荐）
+    #   --id N          关闭那一行（不存在/已结束都是业务错误）
+    #   无 --id：没有未结束的 → 新建；恰有一个 → 关它；多个 → 新建一行并带 warning，
+    #   checkpoint 路径永远不失败（旧实现更新 MAX(id)，每次 checkpoint 覆盖上一次）。
+    warning = None
+    if a.new and a.id is not None:
+        out({"error": "--new 和 --id 不能同时使用"})
+        return
+    if a.new:
+        sid = con.execute("INSERT INTO sessions(started,goal) VALUES(?,?)", (now(), a.goal)).lastrowid
+    elif a.id is not None:
         sid = a.id
-        if sid is None:
-            open_ids = [r[0] for r in con.execute(
-                "SELECT id FROM sessions WHERE ended IS NULL ORDER BY id")]
-            if len(open_ids) > 1:
-                out({"error": f"有 {len(open_ids)} 个未结束的会话 {open_ids}，用 --id 指定要关闭哪一个"})
-                return
-            if open_ids:
-                sid = open_ids[0]
-            else:
-                # 没有未结束的会话（SKILL.md 的轻量 checkpoint 就是只调 close、不调 start）：
-                # 新建一条。旧实现在这里更新 MAX(id)，导致每次 checkpoint 都覆盖上一次的
-                # 记录——真实库里一条会话从 08-04 被覆盖到 10-15，期间的摘要和信号全丢了。
-                sid = con.execute("INSERT INTO sessions(started) VALUES(?)", (now(),)).lastrowid
-        cur = con.execute("UPDATE sessions SET ended=?, atoms_touched=?, summary=?, signals=? WHERE id=?",
-                          (now(), ",".join(a.atoms or []), a.summary, a.signals, sid))
-        if cur.rowcount == 0:  # --id 指向不存在的会话：不能谎报 ok
+        row = con.execute("SELECT ended FROM sessions WHERE id=?", (sid,)).fetchone()
+        if row is None:  # --id 指向不存在的会话：不能谎报 ok
             out({"error": "not found", "session_id": sid})
             return
-        con.commit(); out({"ok": True, "session_id": sid})
+        if row[0] is not None:  # 已结束的会话不能被再次 close 覆盖摘要/信号
+            out({"error": f"会话 {sid} 已经结束", "session_id": sid})
+            return
+    else:
+        open_ids = [r[0] for r in con.execute(
+            "SELECT id FROM sessions WHERE ended IS NULL ORDER BY id")]
+        if len(open_ids) == 1:
+            sid = open_ids[0]
+        else:
+            # 没有未结束的会话（SKILL.md 的轻量 checkpoint 只调 close、不调 start），
+            # 或有多个（遗留的孤儿 start，分不清该关哪个）：都新建一行。
+            sid = con.execute("INSERT INTO sessions(started,goal) VALUES(?,?)", (now(), a.goal)).lastrowid
+            if open_ids:
+                warning = (f"有 {len(open_ids)} 个未结束的会话 {open_ids}，"
+                           "本次 checkpoint 写成了新的一行；用 --id 关闭旧会话")
+    con.execute("UPDATE sessions SET ended=?, atoms_touched=?, summary=?, signals=? WHERE id=?",
+                (now(), ",".join(a.atoms or []), a.summary, a.signals, sid))
+    con.commit()
+    res = {"ok": True, "session_id": sid}
+    if warning:
+        res["warning"] = warning
+    out(res)
 
 
 def cmd_export(a, con):
@@ -1857,8 +1876,13 @@ def cmd_export(a, con):
         f.write("\n".join(lines) + "\n")
     # export 之后通常紧跟着 git 提交 learn.db（完整版 checkpoint）。先把 WAL 合并回
     # 主文件，提交进 git 的才是完整数据；有其他连接在读时合并不完全也不会报错。
-    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    out({"ok": True, "path": path})
+    # 返回 (busy, log, checkpointed)：busy 非 0 说明被长读事务挡住，WAL 没合并完，
+    # 此刻 git 提交 learn.db 会缺数据——如实告诉调用方，别报一个假的 ok。
+    busy = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+    res = {"ok": True, "path": path}
+    if busy:
+        res["wal_checkpoint"] = "incomplete"
+    out(res)
 
 
 def cmd_backup(a, con):
@@ -1868,21 +1892,25 @@ def cmd_backup(a, con):
     p = os.path.join(dst, f"learn-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db")
     # 用 SQLite 的 backup API 而不是复制文件：WAL 模式下还没 checkpoint 的提交
     # 在 learn.db-wal 里，shutil.copy2 只复制主文件，得到的是缺数据的备份。
-    bk = sqlite3.connect(p)
+    # 先写 .tmp，成功后原子改名：失败时只清理 .tmp，不会误删同一秒内已有的同名好备份。
+    tmp = p + ".tmp"
+    if os.path.exists(tmp):  # 上次崩溃遗留
+        os.remove(tmp)
+    bk = sqlite3.connect(tmp)
     try:
         con.backup(bk)
         # 备份改回单文件的 rollback 模式：打开备份时不会在 backups/ 里生成 -wal/-shm
         bk.execute("PRAGMA journal_mode=DELETE")
+        bk.close()
+        os.replace(tmp, p)
     except BaseException:
         bk.close()
-        if os.path.exists(p):  # 半成品不留着：它会占 20 份保留额度，还会被误当成最新备份
-            os.remove(p)
+        if os.path.exists(tmp):  # 半成品不留着
+            os.remove(tmp)
         raise
-    finally:
-        bk.close()
-    keep = sorted(os.listdir(dst))[-20:]
+    keep = sorted(f for f in os.listdir(dst) if f.endswith(".db"))[-20:]
     for f in os.listdir(dst):
-        if f not in keep:
+        if f.endswith(".db") and f not in keep:
             os.remove(os.path.join(dst, f))
     out({"ok": True, "backup": p})
 
@@ -2017,6 +2045,8 @@ def build_parser(parser_class=argparse.ArgumentParser):
     p = sub.add_parser("session", help="会话记账")
     p.add_argument("action", choices=["start", "close"])
     p.add_argument("--goal"); p.add_argument("--id", type=int)
+    p.add_argument("--new", action="store_true",
+                   help="close：总是新建一整行（忽略未结束的会话），程序化调用方用它")
     p.add_argument("--atoms", nargs="*"); p.add_argument("--summary")
     p.add_argument("--signals", help="本次观察到的教学信号，供进化用")
     p.set_defaults(fn=cmd_session)
@@ -2076,6 +2106,11 @@ def run(argv):
     learn-tutor 通过它读写 learn.db。之所以不另写一套 Python API：这样 CLI
     和库按构造就是同一条代码路径，不会出现"同一个概念两处实现"（决策 16 的教训），
     也守住了决策 6——所有库操作都走 learndb 的子命令。
+
+    异常约定：除了 LearnDBError（参数错误、库未初始化、--help），sqlite3.Error
+    （例如等满 5 秒超时后的 "database is locked"）和 OSError（例如数据库目录
+    不可写）原样向上传播，不做包装；业务错误则作为 {"error": ...} 返回。
+    configure() 设置的数据库路径是进程级的：一个进程只能指向一个库。
     """
     try:
         a = build_parser(_LibraryArgumentParser).parse_args([str(x) for x in argv])

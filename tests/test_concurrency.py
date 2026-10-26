@@ -111,6 +111,69 @@ class ConcurrencyTest(unittest.TestCase):
             self.ldb.run(["backup"])
         self.assertEqual(os.listdir(os.path.join(self._tmp.name, "backups")), [])
 
+    def _failing_backup(self):
+        real_connect = self.ldb.connect
+
+        class FailingBackup:
+            def __init__(self, con):
+                self._con = con
+
+            def __getattr__(self, name):
+                return getattr(self._con, name)
+
+            def backup(self, target):
+                self._con.backup(target)
+                raise sqlite3.OperationalError("disk full (simulated)")
+
+        self.ldb.connect = lambda: FailingBackup(real_connect())
+
+    def test_failed_backup_does_not_delete_a_same_name_backup(self):
+        """同一秒内已有同名备份时，第二次备份失败不能把那份好备份删掉。"""
+        import datetime as _dt
+        fixed = _dt.datetime(2026, 1, 2, 3, 4, 5)
+
+        class FixedDatetime(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed
+
+        self.ldb.datetime = FixedDatetime
+        good = self.ldb.run(["backup"])["backup"]
+        with open(good, "rb") as f:
+            before = f.read()
+        self._failing_backup()
+        with self.assertRaises(sqlite3.OperationalError):
+            self.ldb.run(["backup"])
+        with open(good, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(os.listdir(os.path.dirname(good)), [os.path.basename(good)])
+
+    def test_backup_retention_ignores_tmp_files(self):
+        bdir = os.path.join(self._tmp.name, "backups")
+        os.makedirs(bdir)
+        for i in range(25):
+            open(os.path.join(bdir, f"learn-2025010{i % 10}-0000{i:02d}.db"), "w").close()
+        tmp = os.path.join(bdir, "learn-29990101-000000.db.tmp")
+        open(tmp, "w").close()
+        self.ldb.run(["backup"])
+        names = os.listdir(bdir)
+        self.assertEqual(len([n for n in names if n.endswith(".db")]), 20)
+        self.assertIn(os.path.basename(tmp), names)
+
+    def test_export_reports_incomplete_checkpoint_only_when_a_reader_blocks_it(self):
+        k = os.path.join(self._tmp.name, "k.md")
+        self.assertNotIn("wal_checkpoint", self.ldb.run(["export", "--path", k]))
+        reader = sqlite3.connect(self.db, isolation_level=None)
+        try:
+            reader.execute("BEGIN")
+            reader.execute("SELECT COUNT(*) FROM atoms").fetchone()  # 固定在旧快照上
+            self.ldb.run(["add", "inwal", "只在 WAL 里"])
+            res = self.ldb.run(["export", "--path", k])
+            self.assertEqual(res.get("wal_checkpoint"), "incomplete")
+        finally:
+            reader.close()
+        self.assertNotIn("wal_checkpoint", self.ldb.run(["export", "--path", k]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -158,12 +158,60 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(res["session_id"], sid)
         self.assertEqual(self.rows(), [(sid, 1, "s")])
 
-    def test_close_with_several_open_sessions_requires_id(self):
-        self.ldb.run(["session", "start"])
-        self.ldb.run(["session", "start"])
+    def test_bare_close_with_several_open_sessions_writes_a_new_row_with_warning(self):
+        a = self.ldb.run(["session", "start"])["session_id"]
+        b = self.ldb.run(["session", "start"])["session_id"]
         res = self.ldb.run(["session", "close", "--summary", "s"])
+        self.assertTrue(res["ok"])
+        self.assertNotIn(res["session_id"], (a, b))
+        self.assertEqual(res["warning"],
+                         f"有 2 个未结束的会话 [{a}, {b}]，本次 checkpoint 写成了新的一行；用 --id 关闭旧会话")
+        self.assertEqual(self.rows(), [(a, 0, None), (b, 0, None), (res["session_id"], 1, "s")])
+
+    def test_new_flag_inserts_a_row_and_leaves_the_open_session_alone(self):
+        a = self.ldb.run(["session", "start", "--goal", "old"])["session_id"]
+        res = self.ldb.run(["session", "close", "--new", "--summary", "s"])
+        self.assertTrue(res["ok"])
+        self.assertNotEqual(res["session_id"], a)
+        self.assertNotIn("warning", res)
+        self.assertEqual(self.rows(), [(a, 0, None), (res["session_id"], 1, "s")])
+
+    def test_new_flag_stores_goal(self):
+        res = self.ldb.run(["session", "close", "--new", "--goal", "g", "--summary", "s"])
+        import sqlite3
+        con = sqlite3.connect(self.db)
+        try:
+            row = con.execute("SELECT goal, started, ended FROM sessions WHERE id=?",
+                              (res["session_id"],)).fetchone()
+        finally:
+            con.close()
+        self.assertEqual(row[0], "g")
+        self.assertTrue(row[1] and row[2])
+
+    def test_new_flag_with_id_is_an_error(self):
+        a = self.ldb.run(["session", "start"])["session_id"]
+        res = self.ldb.run(["session", "close", "--new", "--id", a, "--summary", "s"])
         self.assertIn("error", res)
-        self.assertEqual([r[1] for r in self.rows()], [0, 0])
+        self.assertEqual(self.rows(), [(a, 0, None)])
+
+    def test_bare_close_with_several_open_sessions_stores_goal(self):
+        self.ldb.run(["session", "start"])
+        self.ldb.run(["session", "start"])
+        res = self.ldb.run(["session", "close", "--goal", "g2"])
+        import sqlite3
+        con = sqlite3.connect(self.db)
+        try:
+            goal = con.execute("SELECT goal FROM sessions WHERE id=?", (res["session_id"],)).fetchone()[0]
+        finally:
+            con.close()
+        self.assertEqual(goal, "g2")
+
+    def test_close_by_id_on_closed_session_is_refused_and_changes_nothing(self):
+        a = self.ldb.run(["session", "start"])["session_id"]
+        self.ldb.run(["session", "close", "--id", a, "--summary", "原始", "--signals", "sig"])
+        res = self.ldb.run(["session", "close", "--id", a, "--summary", "覆盖", "--signals", "x"])
+        self.assertEqual(res, {"error": f"会话 {a} 已经结束", "session_id": a})
+        self.assertEqual(self.rows(), [(a, 1, "原始")])
 
     def test_close_unknown_id_is_an_error(self):
         res = self.ldb.run(["session", "close", "--id", 99, "--summary", "s"])
@@ -182,6 +230,17 @@ class SessionTest(unittest.TestCase):
         self.ldb.run(["session", "start"])
         self.ldb.run(["session", "close", "--id", a, "--summary", "s"])
         self.assertEqual(self.rows()[0], (a, 1, "s"))
+
+
+class CliExitCodeTest(unittest.TestCase):
+    def test_uninitialized_db_exits_1_with_json_on_stdout(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, LEARN_DB=os.path.join(tmp, "learn.db"))
+            r = subprocess.run([sys.executable, golden.LEARNDB, "status"], env=env,
+                               capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("未初始化", json.loads(r.stdout)["error"])
 
 
 if __name__ == "__main__":
